@@ -308,6 +308,34 @@ select[multiple] {
   background: linear-gradient(90deg, var(--accent), var(--accent-2));
 }
 
+.share-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 1rem;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--panel) 80%, var(--accent) 20%), var(--panel));
+  display: grid;
+  gap: 0.9rem;
+}
+
+.share-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.7rem;
+}
+
+.share-grid div {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.65rem;
+  display: grid;
+  gap: 0.25rem;
+  background: color-mix(in srgb, var(--panel) 86%, var(--line) 14%);
+}
+
+.share-grid strong {
+  font-size: 0.85rem;
+}
+
 .gym-day {
   background: color-mix(in srgb, var(--accent) 16%, var(--panel));
 }
@@ -439,6 +467,9 @@ select[multiple] {
     grid-template-columns: 1fr;
   }
   .game-grid {
+    grid-template-columns: 1fr;
+  }
+  .share-grid {
     grid-template-columns: 1fr;
   }
   .tabs {
