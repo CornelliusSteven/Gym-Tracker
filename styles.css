@@ -32,6 +32,7 @@ body[data-theme="pastel"] {
   --card-bg: #fbe5ee;
   --card-selected-bg: #f4c7db;
   --active-ink: #fff9fb;
+  --card-title: #ffffff;
 }
 
 body[data-theme="royal"] {
@@ -172,6 +173,11 @@ button:hover {
   display: grid;
   gap: 0.8rem;
   animation: reveal 220ms ease;
+}
+
+body[data-theme="pastel"] .panel h2,
+body[data-theme="pastel"] .panel h3 {
+  color: var(--card-title);
 }
 
 .metrics {
