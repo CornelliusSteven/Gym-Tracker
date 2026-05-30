@@ -226,7 +226,6 @@ function renderAuthed() {
       <nav class="tabs">
         ${tab("dashboard", "Dashboard")}
         ${tab("workout", "Add Workout")}
-        ${tab("focus", "Body Focus")}
         ${tab("streak", "Streak")}
         ${tab("muscles", "Muscle Groups")}
       </nav>
@@ -242,7 +241,6 @@ function tab(id, label) {
 function renderView(analytics) {
   if (state.currentView === "dashboard") return renderDashboard(analytics);
   if (state.currentView === "workout") return renderWorkout();
-  if (state.currentView === "focus") return renderFocus(analytics.sessions);
   if (state.currentView === "streak") return renderStreak(analytics);
   return renderMuscles();
 }
@@ -260,14 +258,20 @@ function renderDashboard(analytics) {
       ${metric("Gym Days This Week", analytics.weekGymDays)}
       ${metric("Gym Days This Month", analytics.monthGymDays)}
     </div>
-    <div class="panel">
-      <h2>Most Trained This Week</h2>
-      <p>${top ? `${top[0]} (${top[1]} times)` : "No workouts yet"}</p>
-      <button id="go-workout">Add Workout</button>
+    <div class="dashboard-row">
+      <div class="panel">
+        <h2>Most Trained This Week</h2>
+        <p>${top ? `${top[0]} (${top[1]} times)` : "No workouts yet"}</p>
+        <button id="go-workout">Add Workout</button>
+      </div>
+      <div class="panel">
+        <h2>Recent Sessions</h2>
+        ${renderSessions(analytics.sessions.slice(0, 6))}
+      </div>
     </div>
     <div class="panel">
-      <h2>Recent Sessions</h2>
-      ${renderSessions(analytics.sessions.slice(0, 6))}
+      <h2>Monthly Gym Calendar</h2>
+      ${renderMonthlyCalendar(analytics.sessions)}
     </div>
     <div class="panel">
       <h2>Profile</h2>
@@ -275,6 +279,40 @@ function renderDashboard(analytics) {
         <label>Name<input type="text" name="name" value="${escapeHtml(state.user.name || "")}" required /></label>
         <button type="submit">Save Name</button>
       </form>
+    </div>
+  `;
+}
+
+function renderMonthlyCalendar(sessions) {
+  const today = parseIso(todayIso());
+  const year = today.getFullYear();
+  const month = today.getMonth();
+  const monthName = today.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+  const totalDays = new Date(year, month + 1, 0).getDate();
+  const gymDates = new Set(
+    sessions
+      .filter((s) => {
+        const d = parseIso(s.date);
+        return d.getFullYear() === year && d.getMonth() === month;
+      })
+      .map((s) => Number(s.date.slice(8, 10)))
+  );
+
+  const dayCells = [];
+  for (let day = 1; day <= totalDays; day += 1) {
+    const isGym = gymDates.has(day);
+    dayCells.push(`
+      <div class="calendar-day ${isGym ? "gym-day" : "rest-day"}">
+        <strong>${day}</strong>
+        <span>${isGym ? "Gym" : "Rest"}</span>
+      </div>
+    `);
+  }
+
+  return `
+    <p>${monthName}</p>
+    <div class="calendar-grid">
+      ${dayCells.join("")}
     </div>
   `;
 }
