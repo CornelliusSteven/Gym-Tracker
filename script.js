@@ -2,7 +2,7 @@ const STORAGE_KEY = "gym_tracker_v1";
 const THEME_KEY = "gym_tracker_theme_v1";
 const DEFAULT_MUSCLES = ["Chest", "Back", "Legs", "Shoulders", "Biceps", "Triceps", "Core"];
 const DEFAULT_PRIMARY = ["Chest", "Back", "Shoulder", "Leg"];
-const DEFAULT_SECONDARY = ["Bicep", "Tricep", "Forearm", "Calves", "Abs"];
+const DEFAULT_SECONDARY = ["Biceps", "Triceps", "Forearms", "Calves", "Abs"];
 
 const state = {
   store: loadStore(),
@@ -538,10 +538,12 @@ function renderMuscles() {
         <h2>Primary Muscle</h2>
         ${muscles.primary
           .map(
-            (m) => `
+            (m, i) => `
           <div class="list-item">
             <strong>${escapeHtml(m)}</strong>
-            <span>Default</span>
+            <div class="inline-actions">
+              <button class="danger" data-remove-default="primary:${i}">Remove</button>
+            </div>
           </div>
         `
           )
@@ -567,10 +569,12 @@ function renderMuscles() {
         <h2>Secondary Muscle</h2>
         ${muscles.secondary
           .map(
-            (m) => `
+            (m, i) => `
           <div class="list-item">
             <strong>${escapeHtml(m)}</strong>
-            <span>Default</span>
+            <div class="inline-actions">
+              <button class="danger" data-remove-default="secondary:${i}">Remove</button>
+            </div>
           </div>
         `
           )
@@ -836,6 +840,19 @@ function bindEvents() {
       const muscles = getUserMuscles(state.user.id);
       if (type === "primary") muscles.customPrimary.splice(idx, 1);
       if (type === "secondary") muscles.customSecondary.splice(idx, 1);
+      setUserMuscles(state.user.id, muscles);
+      render();
+    });
+  });
+
+  document.querySelectorAll("[data-remove-default]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const payload = btn.dataset.removeDefault || "";
+      const [type, idxText] = payload.split(":");
+      const idx = Number(idxText);
+      const muscles = getUserMuscles(state.user.id);
+      if (type === "primary") muscles.primary.splice(idx, 1);
+      if (type === "secondary") muscles.secondary.splice(idx, 1);
       setUserMuscles(state.user.id, muscles);
       render();
     });
