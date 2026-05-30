@@ -195,6 +195,10 @@ button:hover {
   color: var(--accent);
 }
 
+body[data-theme="pastel"] .metric h3 {
+  color: #fffdfd;
+}
+
 label {
   display: grid;
   gap: 0.4rem;
