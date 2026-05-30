@@ -170,10 +170,13 @@ function render() {
 
 function renderThemePicker() {
   return `
-    <div class="theme-picker" role="group" aria-label="Theme picker">
+    <div class="theme-picker-wrap">
+      <span class="theme-label">Theme:</span>
+      <div class="theme-picker" role="group" aria-label="Theme picker">
       <button type="button" class="theme-dot ${state.theme === "dark" ? "active" : ""}" data-theme="dark" title="Current dark-grey"></button>
       <button type="button" class="theme-dot pastel ${state.theme === "pastel" ? "active" : ""}" data-theme="pastel" title="Pastel pink"></button>
       <button type="button" class="theme-dot royal ${state.theme === "royal" ? "active" : ""}" data-theme="royal" title="Purple and brown"></button>
+      </div>
     </div>
   `;
 }
@@ -213,8 +216,11 @@ function renderAuthed() {
   return `
     <main class="shell">
       <header class="topbar">
-        <div><h1>Gym Tracker</h1><p>${escapeHtml(profileName)} (${escapeHtml(state.user.email)})</p></div>
-        ${renderThemePicker()}
+        <div>
+          <h1>Gym Tracker</h1>
+          <p>${escapeHtml(profileName)} (${escapeHtml(state.user.email)})</p>
+          ${renderThemePicker()}
+        </div>
         <button id="logout-btn" class="ghost">Logout</button>
       </header>
       <nav class="tabs">
