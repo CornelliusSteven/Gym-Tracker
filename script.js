@@ -345,6 +345,7 @@ function metric(label, value) {
 
 function renderDashboard(analytics) {
   const top = topPair(analytics.weekMuscles);
+  const sharePayload = getSharePayload(analytics, top);
   return `
     <div class="metrics">
       ${metric("Current Streak", `${analytics.currentStreak} gym days`)}
@@ -379,12 +380,50 @@ function renderDashboard(analytics) {
       ${renderMonthlyCalendar(analytics.sessions)}
     </div>
     <div class="panel">
+      <h2>Share This Week</h2>
+      ${renderShareCard(sharePayload)}
+      <div class="inline-actions">
+        <button id="copy-share-summary">Copy Summary</button>
+        <button id="download-share-card" class="cta-add-workout">Download Card</button>
+      </div>
+    </div>
+    <div class="panel">
       <h2>Profile</h2>
       <form id="profile-form">
         <label>Name<input type="text" name="name" value="${escapeHtml(state.user.name || "")}" required /></label>
         <button type="submit">Save Name</button>
       </form>
     </div>
+  `;
+}
+
+function getSharePayload(analytics, topMuscle) {
+  const displayName = state.user?.name?.trim() ? state.user.name.trim() : state.user?.email || "Gym User";
+  return {
+    name: displayName,
+    weeklyStreak: analytics.weeklyStreak,
+    currentStreak: analytics.currentStreak,
+    weekGymDays: analytics.weekGymDays,
+    topMuscle: topMuscle ? `${topMuscle[0]} (${topMuscle[1]}x)` : "No workouts yet",
+    level: analytics.level,
+    xp: analytics.xp,
+    xpIntoLevel: analytics.xpIntoLevel,
+  };
+}
+
+function renderShareCard(payload) {
+  return `
+    <article class="share-card" id="share-card">
+      <h3>${escapeHtml(payload.name)} - Weekly Gym Update</h3>
+      <div class="share-grid">
+        <div><strong>Current Streak</strong><span>${payload.currentStreak} days</span></div>
+        <div><strong>Weekly Streak</strong><span>${payload.weeklyStreak} weeks</span></div>
+        <div><strong>Gym Days</strong><span>${payload.weekGymDays} this week</span></div>
+        <div><strong>Top Muscle</strong><span>${escapeHtml(payload.topMuscle)}</span></div>
+        <div><strong>Level</strong><span>${payload.level}</span></div>
+        <div><strong>XP</strong><span>${payload.xp} total (${payload.xpIntoLevel}/100)</span></div>
+      </div>
+    </article>
   `;
 }
 
@@ -899,6 +938,40 @@ function bindEvents() {
     });
   }
 
+  const copyShareSummary = document.getElementById("copy-share-summary");
+  if (copyShareSummary) {
+    copyShareSummary.addEventListener("click", async () => {
+      const analytics = computeAnalytics(state.user.id);
+      const top = topPair(analytics.weekMuscles);
+      const payload = getSharePayload(analytics, top);
+      const summary = [
+        `${payload.name} - Weekly Gym Update`,
+        `Current Streak: ${payload.currentStreak} days`,
+        `Weekly Streak: ${payload.weeklyStreak} weeks`,
+        `Gym Days This Week: ${payload.weekGymDays}`,
+        `Top Muscle: ${payload.topMuscle}`,
+        `Level: ${payload.level}`,
+        `XP: ${payload.xp} (${payload.xpIntoLevel}/100 to next level)`,
+      ].join("\n");
+      try {
+        await navigator.clipboard.writeText(summary);
+        alert("Summary copied.");
+      } catch {
+        alert("Clipboard blocked by browser. Please copy manually.");
+      }
+    });
+  }
+
+  const downloadShareCard = document.getElementById("download-share-card");
+  if (downloadShareCard) {
+    downloadShareCard.addEventListener("click", () => {
+      const analytics = computeAnalytics(state.user.id);
+      const top = topPair(analytics.weekMuscles);
+      const payload = getSharePayload(analytics, top);
+      downloadShareImage(payload);
+    });
+  }
+
   const muscleAddForm = document.getElementById("muscle-add-form");
   if (muscleAddForm) {
     muscleAddForm.addEventListener("submit", (e) => {
@@ -982,4 +1055,47 @@ function bindEvents() {
       render();
     });
   }
+}
+
+function downloadShareImage(payload) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 1200;
+  canvas.height = 628;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+
+  ctx.fillStyle = "#1a1d20";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "#f3a530";
+  ctx.fillRect(0, 0, canvas.width, 16);
+
+  ctx.fillStyle = "#f2f3f5";
+  ctx.font = "700 48px Arial";
+  ctx.fillText("Weekly Gym Update", 60, 90);
+  ctx.font = "600 34px Arial";
+  ctx.fillText(payload.name, 60, 140);
+
+  const rows = [
+    `Current Streak: ${payload.currentStreak} days`,
+    `Weekly Streak: ${payload.weeklyStreak} weeks`,
+    `Gym Days This Week: ${payload.weekGymDays}`,
+    `Top Muscle: ${payload.topMuscle}`,
+    `Level: ${payload.level}`,
+    `XP: ${payload.xp} (${payload.xpIntoLevel}/100 to next level)`,
+  ];
+
+  ctx.font = "500 32px Arial";
+  ctx.fillStyle = "#e8edf1";
+  rows.forEach((row, i) => {
+    ctx.fillText(row, 60, 220 + i * 62);
+  });
+
+  ctx.fillStyle = "#a8afb7";
+  ctx.font = "500 24px Arial";
+  ctx.fillText("Generated from Gym Tracker", 60, 588);
+
+  const link = document.createElement("a");
+  link.href = canvas.toDataURL("image/png");
+  link.download = "gym-weekly-share-card.png";
+  link.click();
 }
