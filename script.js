@@ -160,14 +160,66 @@ function computeAnalytics(userId) {
     }
   });
 
+  const gameStats = computeGameStats(uniqueDates);
+
   return {
     sessions,
     ...computeStreak(uniqueDates),
+    ...gameStats,
     weekGymDays: weekDays.size,
     monthGymDays: monthDays.size,
     weekMuscles,
     monthMuscles,
   };
+}
+
+function computeGameStats(uniqueDatesAsc) {
+  const gymDays = uniqueDatesAsc.length;
+  const xp = gymDays * 10;
+  const level = Math.floor(xp / 100) + 1;
+  const xpIntoLevel = xp % 100;
+  const weeklyStreak = computeWeeklyStreak(uniqueDatesAsc);
+  return { xp, level, xpIntoLevel, weeklyStreak };
+}
+
+function computeWeeklyStreak(uniqueDatesAsc) {
+  if (!uniqueDatesAsc.length) return 0;
+
+  const activeWeekKeys = new Set();
+  uniqueDatesAsc.forEach((iso) => {
+    const weekStart = weekStartMonday(parseIso(iso));
+    activeWeekKeys.add(toIso(weekStart));
+  });
+
+  const sortedWeekKeys = [...activeWeekKeys].sort();
+  let streak = 1;
+  let bestEnding = 1;
+  for (let i = 1; i < sortedWeekKeys.length; i += 1) {
+    const prev = parseIso(sortedWeekKeys[i - 1]);
+    const cur = parseIso(sortedWeekKeys[i]);
+    const gapDays = Math.floor((cur - prev) / 86400000);
+    if (gapDays === 7) {
+      streak += 1;
+    } else {
+      streak = 1;
+    }
+    if (i === sortedWeekKeys.length - 1) {
+      bestEnding = streak;
+    }
+  }
+
+  const latestWeek = parseIso(sortedWeekKeys[sortedWeekKeys.length - 1]);
+  const currentWeek = weekStartMonday(parseIso(todayIso()));
+  const gapFromCurrent = Math.floor((currentWeek - latestWeek) / 86400000);
+  if (gapFromCurrent > 7) return 0;
+  return bestEnding;
+}
+
+function toIso(date) {
+  const y = date.getFullYear();
+  const m = `${date.getMonth() + 1}`.padStart(2, "0");
+  const d = `${date.getDate()}`.padStart(2, "0");
+  return `${y}-${m}-${d}`;
 }
 
 function topPair(mapObj) {
@@ -278,6 +330,17 @@ function renderDashboard(analytics) {
       ${metric("Longest Streak", `${analytics.longestStreak} gym days`)}
       ${metric("Gym Days This Week", analytics.weekGymDays)}
       ${metric("Gym Days This Month", analytics.monthGymDays)}
+    </div>
+    <div class="panel">
+      <h2>Streak Game</h2>
+      <div class="game-grid">
+        <div class="game-stat"><strong>XP</strong><span>${analytics.xp}</span></div>
+        <div class="game-stat"><strong>Level</strong><span>${analytics.level}</span></div>
+        <div class="game-stat"><strong>Weekly Streak</strong><span>${analytics.weeklyStreak}</span></div>
+      </div>
+      <p>${analytics.xpIntoLevel}/100 XP to next level</p>
+      <div class="xp-track"><div class="xp-fill" style="width:${analytics.xpIntoLevel}%"></div></div>
+      <p>Rule: +10 XP per gym day. Weekly streak counts active weeks from Monday to Sunday.</p>
     </div>
     <div class="dashboard-row">
       <div class="panel">
