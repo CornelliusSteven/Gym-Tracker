@@ -96,6 +96,8 @@ function getUserMuscles(userId) {
     };
     saveStore();
   }
+
+  normalizeLegacySecondaryNames(existing);
   return state.store.musclesByUser[userId];
 }
 
@@ -107,6 +109,25 @@ function setUserMuscles(userId, muscles) {
 function getAllMuscles(userId) {
   const groups = getUserMuscles(userId);
   return [...groups.primary, ...groups.secondary, ...groups.customPrimary, ...groups.customSecondary];
+}
+
+function normalizeLegacySecondaryNames(groups) {
+  if (!groups || !Array.isArray(groups.secondary)) return;
+  const replaceMap = {
+    bicep: "Biceps",
+    tricep: "Triceps",
+    forearm: "Forearms",
+  };
+  let changed = false;
+  groups.secondary = groups.secondary.map((name) => {
+    const key = String(name || "").trim().toLowerCase();
+    if (replaceMap[key]) {
+      changed = true;
+      return replaceMap[key];
+    }
+    return name;
+  });
+  if (changed) saveStore();
 }
 
 function computeStreak(uniqueDatesAsc) {
