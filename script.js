@@ -722,7 +722,7 @@ function bindEvents() {
     });
   });
 
-  document.querySelectorAll("[data-theme]").forEach((btn) => {
+  document.querySelectorAll(".theme-dot[data-theme]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const next = btn.dataset.theme;
       if (!next) return;
