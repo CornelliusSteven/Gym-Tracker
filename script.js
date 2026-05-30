@@ -1,6 +1,8 @@
 const STORAGE_KEY = "gym_tracker_v1";
 const THEME_KEY = "gym_tracker_theme_v1";
 const DEFAULT_MUSCLES = ["Chest", "Back", "Legs", "Shoulders", "Biceps", "Triceps", "Core"];
+const DEFAULT_PRIMARY = ["Chest", "Back", "Shoulder", "Leg"];
+const DEFAULT_SECONDARY = ["Bicep", "Tricep", "Forearm", "Calves", "Abs"];
 
 const state = {
   store: loadStore(),
@@ -76,7 +78,22 @@ function getUserSessions(userId) {
 
 function getUserMuscles(userId) {
   if (!state.store.musclesByUser[userId]) {
-    state.store.musclesByUser[userId] = [...DEFAULT_MUSCLES];
+    state.store.musclesByUser[userId] = {
+      primary: [...DEFAULT_PRIMARY],
+      secondary: [...DEFAULT_SECONDARY],
+      customPrimary: [],
+      customSecondary: [],
+    };
+    saveStore();
+  }
+  const existing = state.store.musclesByUser[userId];
+  if (Array.isArray(existing)) {
+    state.store.musclesByUser[userId] = {
+      primary: [...DEFAULT_PRIMARY],
+      secondary: [...DEFAULT_SECONDARY],
+      customPrimary: existing.filter((m) => !DEFAULT_PRIMARY.includes(m)),
+      customSecondary: [],
+    };
     saveStore();
   }
   return state.store.musclesByUser[userId];
@@ -85,6 +102,11 @@ function getUserMuscles(userId) {
 function setUserMuscles(userId, muscles) {
   state.store.musclesByUser[userId] = muscles;
   saveStore();
+}
+
+function getAllMuscles(userId) {
+  const groups = getUserMuscles(userId);
+  return [...groups.primary, ...groups.secondary, ...groups.customPrimary, ...groups.customSecondary];
 }
 
 function computeStreak(uniqueDatesAsc) {
@@ -225,7 +247,6 @@ function renderAuthed() {
       </header>
       <nav class="tabs">
         ${tab("dashboard", "Dashboard")}
-        ${tab("workout", "Add Workout")}
         ${tab("streak", "Streak")}
         ${tab("muscles", "Muscle Groups")}
       </nav>
@@ -262,7 +283,7 @@ function renderDashboard(analytics) {
       <div class="panel">
         <h2>Most Trained This Week</h2>
         <p>${top ? `${top[0]} (${top[1]} times)` : "No workouts yet"}</p>
-        <button id="go-workout">Add Workout</button>
+        <button id="go-workout" class="cta-add-workout">+ Add Workout</button>
       </div>
       <div class="panel">
         <h2>Recent Sessions</h2>
@@ -343,10 +364,13 @@ function ensureWorkoutState() {
 
 function renderWorkout() {
   ensureWorkoutState();
-  const muscles = getUserMuscles(state.user.id);
+  const muscles = getAllMuscles(state.user.id);
   const draft = state.workoutDraft;
   const builder = state.liftBuilder;
   return `
+    <div class="panel">
+      <button id="back-dashboard" class="ghost">Back</button>
+    </div>
     <form id="muscle-select-form" class="panel">
       <h2>Workout Tracker</h2>
       <p><strong>Date:</strong> ${formatDate(draft.date)}</p>
@@ -509,31 +533,77 @@ function renderSummary(mapObj) {
 function renderMuscles() {
   const muscles = getUserMuscles(state.user.id);
   return `
-    <form id="muscle-add-form" class="panel">
-      <h2>Muscle Group Management</h2>
-      <label>Add muscle group<input type="text" name="muscleName" required /></label>
-      <button type="submit">Add Muscle Group</button>
-    </form>
-    <div class="panel">
-      <h2>Your Muscle Groups</h2>
-      ${
-        muscles.length
-          ? muscles
-              .map(
-                (m, i) => `
+    <div class="muscle-management-grid">
+      <div class="panel">
+        <h2>Primary Muscle</h2>
+        ${muscles.primary
+          .map(
+            (m) => `
           <div class="list-item">
             <strong>${escapeHtml(m)}</strong>
-            <div class="inline-actions">
-              <button class="ghost" data-rename-index="${i}">Rename</button>
-              <button class="danger" data-remove-index="${i}">Remove</button>
-            </div>
+            <span>Default</span>
           </div>
         `
-              )
-              .join("")
-          : "<p>No muscle groups yet.</p>"
-      }
+          )
+          .join("")}
+        ${
+          muscles.customPrimary.length
+            ? muscles.customPrimary
+                .map(
+                  (m, i) => `
+              <div class="list-item">
+                <strong>${escapeHtml(m)}</strong>
+                <div class="inline-actions">
+                  <button class="danger" data-remove-custom="primary:${i}">Remove</button>
+                </div>
+              </div>
+            `
+                )
+                .join("")
+            : ""
+        }
+      </div>
+      <div class="panel">
+        <h2>Secondary Muscle</h2>
+        ${muscles.secondary
+          .map(
+            (m) => `
+          <div class="list-item">
+            <strong>${escapeHtml(m)}</strong>
+            <span>Default</span>
+          </div>
+        `
+          )
+          .join("")}
+        ${
+          muscles.customSecondary.length
+            ? muscles.customSecondary
+                .map(
+                  (m, i) => `
+              <div class="list-item">
+                <strong>${escapeHtml(m)}</strong>
+                <div class="inline-actions">
+                  <button class="danger" data-remove-custom="secondary:${i}">Remove</button>
+                </div>
+              </div>
+            `
+                )
+                .join("")
+            : ""
+        }
+      </div>
     </div>
+    <form id="muscle-add-form" class="panel">
+      <h2>Add Muscle Group</h2>
+      <label>Muscle name<input type="text" name="muscleName" required /></label>
+      <label>Category
+        <select name="muscleCategory" required>
+          <option value="primary">Primary</option>
+          <option value="secondary">Secondary</option>
+        </select>
+      </label>
+      <button type="submit">Add Muscle Group</button>
+    </form>
   `;
 }
 
@@ -559,7 +629,7 @@ function renderEditSessionPanel() {
   if (!state.editingSessionId) return "";
   const session = state.store.sessions.find((s) => s.id === state.editingSessionId && s.userId === state.user.id);
   if (!session) return "";
-  const muscles = getUserMuscles(state.user.id);
+  const muscles = getAllMuscles(state.user.id);
   return `
     <form id="edit-session-form" class="panel">
       <h2>Edit Submitted Workout</h2>
@@ -596,7 +666,12 @@ function bindEvents() {
       if (state.store.users.some((u) => u.email === email)) return alert("Email already registered.");
       const user = { id: uid("user"), name, email, password };
       state.store.users.push(user);
-      state.store.musclesByUser[user.id] = [...DEFAULT_MUSCLES];
+      state.store.musclesByUser[user.id] = {
+        primary: [...DEFAULT_PRIMARY],
+        secondary: [...DEFAULT_SECONDARY],
+        customPrimary: [],
+        customSecondary: [],
+      };
       saveStore();
       e.target.reset();
       alert("Registration success. Please login.");
@@ -643,6 +718,13 @@ function bindEvents() {
   if (goWorkout) {
     goWorkout.addEventListener("click", () => {
       state.currentView = "workout";
+      render();
+    });
+  }
+  const backDashboard = document.getElementById("back-dashboard");
+  if (backDashboard) {
+    backDashboard.addEventListener("click", () => {
+      state.currentView = "dashboard";
       render();
     });
   }
@@ -734,33 +816,26 @@ function bindEvents() {
     muscleAddForm.addEventListener("submit", (e) => {
       e.preventDefault();
       const name = e.target.muscleName.value.trim();
+      const category = e.target.muscleCategory.value;
       if (!name) return;
       const muscles = getUserMuscles(state.user.id);
-      if (muscles.some((m) => m.toLowerCase() === name.toLowerCase())) return alert("Muscle group already exists.");
-      muscles.push(name);
+      const all = [...muscles.primary, ...muscles.secondary, ...muscles.customPrimary, ...muscles.customSecondary];
+      if (all.some((m) => m.toLowerCase() === name.toLowerCase())) return alert("Muscle group already exists.");
+      if (category === "primary") muscles.customPrimary.push(name);
+      if (category === "secondary") muscles.customSecondary.push(name);
       setUserMuscles(state.user.id, muscles);
       e.target.reset();
       render();
     });
   }
-
-  document.querySelectorAll("[data-remove-index]").forEach((btn) => {
+  document.querySelectorAll("[data-remove-custom]").forEach((btn) => {
     btn.addEventListener("click", () => {
-      const idx = Number(btn.dataset.removeIndex);
-      const muscles = [...getUserMuscles(state.user.id)];
-      muscles.splice(idx, 1);
-      setUserMuscles(state.user.id, muscles);
-      render();
-    });
-  });
-
-  document.querySelectorAll("[data-rename-index]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const idx = Number(btn.dataset.renameIndex);
-      const muscles = [...getUserMuscles(state.user.id)];
-      const next = prompt("New muscle group name:", muscles[idx]);
-      if (!next) return;
-      muscles[idx] = next.trim();
+      const payload = btn.dataset.removeCustom || "";
+      const [type, idxText] = payload.split(":");
+      const idx = Number(idxText);
+      const muscles = getUserMuscles(state.user.id);
+      if (type === "primary") muscles.customPrimary.splice(idx, 1);
+      if (type === "secondary") muscles.customSecondary.splice(idx, 1);
       setUserMuscles(state.user.id, muscles);
       render();
     });
