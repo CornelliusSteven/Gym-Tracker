@@ -122,7 +122,7 @@ p {
 
 .tabs {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 0.5rem;
 }
 
@@ -161,6 +161,12 @@ button:hover {
 
 .content {
   display: grid;
+  gap: 1rem;
+}
+
+.dashboard-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 1rem;
 }
 
@@ -241,6 +247,33 @@ select[multiple] {
 
 .hint {
   font-size: 0.88rem;
+}
+
+.calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+  gap: 0.55rem;
+}
+
+.calendar-day {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.5rem;
+  display: grid;
+  gap: 0.25rem;
+  min-height: 62px;
+}
+
+.calendar-day strong {
+  font-family: "Space Grotesk", sans-serif;
+}
+
+.gym-day {
+  background: color-mix(in srgb, var(--accent) 16%, var(--panel));
+}
+
+.rest-day {
+  background: color-mix(in srgb, var(--line) 22%, var(--panel));
 }
 
 .theme-row {
@@ -348,6 +381,9 @@ select[multiple] {
 @media (max-width: 900px) {
   .auth-grid,
   .metrics {
+    grid-template-columns: 1fr;
+  }
+  .dashboard-row {
     grid-template-columns: 1fr;
   }
   .tabs {
