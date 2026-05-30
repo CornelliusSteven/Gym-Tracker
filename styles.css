@@ -7,17 +7,31 @@ body[data-theme="dark"] {
   --accent-2: #f2b650;
   --danger: #ff6c7a;
   --line: #333940;
+  --control-bg: #252a2f;
+  --control-ink: #f2f3f5;
+  --input-bg: #121518;
+  --input-ink: #f2f3f5;
+  --card-bg: #20252a;
+  --card-selected-bg: #2f2b1d;
+  --active-ink: #171a1d;
 }
 
 body[data-theme="pastel"] {
-  --bg: #fff5f8;
-  --panel: #fff9fb;
-  --ink: #4f2b3e;
-  --muted: #9a6f86;
-  --accent: #ef8db3;
-  --accent-2: #f6a1c2;
-  --danger: #c84d7c;
-  --line: #f0c8d8;
+  --bg: #ffeef4;
+  --panel: #fff7fb;
+  --ink: #5a2c42;
+  --muted: #8e5f78;
+  --accent: #ec7da8;
+  --accent-2: #f09dbf;
+  --danger: #b84570;
+  --line: #efbfd2;
+  --control-bg: #f9dce8;
+  --control-ink: #5a2c42;
+  --input-bg: #fff3f8;
+  --input-ink: #5a2c42;
+  --card-bg: #fbe5ee;
+  --card-selected-bg: #f4c7db;
+  --active-ink: #fff9fb;
 }
 
 body[data-theme="royal"] {
@@ -29,6 +43,13 @@ body[data-theme="royal"] {
   --accent-2: #be7ff0;
   --danger: #d86d79;
   --line: #6b4f3e;
+  --control-bg: #3c2b4d;
+  --control-ink: #f3e8d6;
+  --input-bg: #24192f;
+  --input-ink: #f3e8d6;
+  --card-bg: #322340;
+  --card-selected-bg: #4f3152;
+  --active-ink: #f3e8d6;
 }
 
 * {
@@ -108,8 +129,8 @@ p {
 .tab,
 button {
   border: 1px solid var(--line);
-  background: #252a2f;
-  color: var(--ink);
+  background: var(--control-bg);
+  color: var(--control-ink);
   border-radius: 8px;
   padding: 0.7rem 0.9rem;
   font-weight: 700;
@@ -125,7 +146,7 @@ button:hover {
 
 .tab.active {
   background: var(--accent);
-  color: #171a1d;
+  color: var(--active-ink);
   border-color: var(--accent);
 }
 
@@ -189,8 +210,8 @@ textarea {
   border-radius: 8px;
   padding: 0.65rem 0.75rem;
   font: inherit;
-  color: var(--ink);
-  background: #121518;
+  color: var(--input-ink);
+  background: var(--input-bg);
 }
 
 select[multiple] {
@@ -221,6 +242,18 @@ select[multiple] {
 .theme-row {
   display: flex;
   justify-content: flex-end;
+}
+
+.theme-picker-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.theme-label {
+  color: var(--muted);
+  font-weight: 700;
+  font-size: 0.9rem;
 }
 
 .theme-picker {
@@ -279,7 +312,7 @@ select[multiple] {
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 0.8rem;
-  background: #20252a;
+  background: var(--card-bg);
   transition: border-color 0.2s ease, background-color 0.2s ease, color 0.2s ease;
 }
 
@@ -293,8 +326,8 @@ select[multiple] {
 
 .muscle-card input:checked + .muscle-card-body {
   border-color: var(--accent);
-  background: #2f2b1d;
-  color: #ffd38a;
+  background: var(--card-selected-bg);
+  color: var(--ink);
 }
 
 @keyframes reveal {
