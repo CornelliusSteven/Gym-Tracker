@@ -275,6 +275,39 @@ select[multiple] {
   font-size: 1.05rem;
 }
 
+.game-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.7rem;
+}
+
+.game-stat {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.7rem;
+  display: grid;
+  gap: 0.3rem;
+  background: color-mix(in srgb, var(--panel) 82%, var(--accent) 18%);
+}
+
+.game-stat span {
+  font-size: 1.2rem;
+  font-weight: 800;
+}
+
+.xp-track {
+  height: 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  overflow: hidden;
+  background: color-mix(in srgb, var(--panel) 85%, var(--line) 15%);
+}
+
+.xp-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+}
+
 .gym-day {
   background: color-mix(in srgb, var(--accent) 16%, var(--panel));
 }
@@ -403,6 +436,9 @@ select[multiple] {
     grid-template-columns: 1fr;
   }
   .muscle-management-grid {
+    grid-template-columns: 1fr;
+  }
+  .game-grid {
     grid-template-columns: 1fr;
   }
   .tabs {
