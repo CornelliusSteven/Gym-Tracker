@@ -6,7 +6,7 @@ const WORKOUT_DRAFT_STORAGE_PREFIX = "gym_tracker_workout_draft_v1";
 const WORKOUT_DRAFT_VERSION = 1;
 const DRAFT_SYNC_DELAY_MS = 900;
 // Temporary backfill access: set false to restore Today/Yesterday only.
-const ALLOW_ANY_WORKOUT_DATE = true;
+const ALLOW_ANY_WORKOUT_DATE = false;
 const DEFAULT_PRIMARY = ["Chest", "Back", "Shoulder", "Leg"];
 const DEFAULT_SECONDARY = ["Biceps", "Triceps", "Forearms", "Calves", "Abs"];
 let draftSyncTimer = null;

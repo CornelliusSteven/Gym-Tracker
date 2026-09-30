@@ -1936,3 +1936,27 @@ body[data-theme="graphite"] :is(button, input, select, textarea):focus-visible {
   outline-offset: 3px;
   box-shadow: 0 0 4px rgb(255 255 255 / 45%), 0 0 18px rgb(255 255 255 / 22%);
 }
+
+/* Solid calendar tiles make training days easy to distinguish at a glance. */
+body[data-theme="graphite"] .monthly-calendar {
+  background: #181a1d;
+  border-radius: 10px;
+  padding: 0.85rem;
+}
+
+body[data-theme="graphite"] .calendar-day.rest-day {
+  background: #292c30;
+  color: #d6d8da;
+  border-color: #51565c;
+}
+
+body[data-theme="graphite"] .calendar-day.gym-day {
+  background: #eeeeee;
+  color: #101113;
+  border-color: #ffffff;
+}
+
+body[data-theme="graphite"] .calendar-day.selected-day {
+  outline: 2px solid #ffffff;
+  outline-offset: 3px;
+}
