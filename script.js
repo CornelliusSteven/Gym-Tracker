@@ -1,43 +1,658 @@
-const STORAGE_KEY = "gym_tracker_v1";
+import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm";
+
 const THEME_KEY = "gym_tracker_theme_v1";
-const DEFAULT_MUSCLES = ["Chest", "Back", "Legs", "Shoulders", "Biceps", "Triceps", "Core"];
+const BUTTON_SOUND_KEY = "gymboard_button_sounds_v1";
+const WORKOUT_DRAFT_STORAGE_PREFIX = "gym_tracker_workout_draft_v1";
+const WORKOUT_DRAFT_VERSION = 1;
+const DRAFT_SYNC_DELAY_MS = 900;
+// Temporary backfill access: set false to restore Today/Yesterday only.
+const ALLOW_ANY_WORKOUT_DATE = true;
 const DEFAULT_PRIMARY = ["Chest", "Back", "Shoulder", "Leg"];
 const DEFAULT_SECONDARY = ["Biceps", "Triceps", "Forearms", "Calves", "Abs"];
+let draftSyncTimer = null;
+let draftSyncInFlight = null;
+let lastServerDraftSavedAt = null;
+let draftLifecycleRegistered = false;
+let buttonSoundsRegistered = false;
+let buttonAudioContext = null;
+let lastButtonSoundAt = -Infinity;
 
 const state = {
-  store: loadStore(),
-  user: null,
+  supabase: null,
+  theme: loadTheme(),
+  buttonSoundsEnabled: loadButtonSoundsPreference(),
+  authUser: null,
+  profile: null,
+  sessions: [],
+  muscles: [],
   currentView: "dashboard",
   workoutDraft: null,
   liftBuilder: null,
-  editingSessionId: null,
-  theme: loadTheme(),
+  selectedCalendarDate: null,
+  calendarMonth: null,
+  trackRange: "allTime",
+  selectedAnalyticsMuscle: null,
+  submittedWorkoutFilter: "last20",
+  loading: true,
+  busy: false,
+  setupError: "",
+  draftStatus: "idle",
+  draftUpdatedAt: null,
+  draftId: null,
+  draftBackendAvailable: true,
 };
 
-render();
+await init();
 
-function loadTheme() {
-  const saved = localStorage.getItem(THEME_KEY);
-  if (saved === "dark" || saved === "pastel" || saved === "royal") return saved;
-  return "dark";
+async function init() {
+  registerDraftLifecycleHandlers();
+  registerButtonSounds();
+  const config = window.GYM_TRACKER_SUPABASE_CONFIG || {};
+  if (!isSupabaseConfigReady(config)) {
+    state.setupError = "Supabase is not configured yet. Add your project URL and anon key in supabase.config.js.";
+    state.loading = false;
+    render();
+    return;
+  }
+
+  state.supabase = createClient(config.url, config.anonKey, {
+    auth: {
+      persistSession: true,
+      autoRefreshToken: true,
+    },
+  });
+
+  const { data } = await state.supabase.auth.getSession();
+  state.authUser = data.session?.user || null;
+
+  state.supabase.auth.onAuthStateChange(async (_event, session) => {
+    const previousUserId = state.authUser?.id || null;
+    const nextUser = session?.user || null;
+    const nextUserId = nextUser?.id || null;
+
+    state.authUser = nextUser;
+    if (previousUserId === nextUserId) return;
+
+    clearTimeout(draftSyncTimer);
+    state.currentView = "dashboard";
+    state.workoutDraft = null;
+    state.liftBuilder = null;
+    state.draftStatus = "idle";
+    state.draftUpdatedAt = null;
+    state.draftId = null;
+    lastServerDraftSavedAt = null;
+    state.draftBackendAvailable = true;
+    state.selectedCalendarDate = null;
+    state.calendarMonth = null;
+    state.selectedAnalyticsMuscle = null;
+    state.submittedWorkoutFilter = "last20";
+    if (state.authUser) {
+      await hydrateUserData();
+      await restoreWorkoutDraft();
+    } else {
+      state.profile = null;
+      state.sessions = [];
+      state.muscles = [];
+    }
+    state.loading = false;
+    render();
+  });
+
+  if (state.authUser) {
+    await hydrateUserData();
+    await restoreWorkoutDraft();
+  }
+
+  state.loading = false;
+  render();
 }
 
-function loadStore() {
-  const raw = localStorage.getItem(STORAGE_KEY);
-  if (!raw) return { users: [], sessions: [], musclesByUser: {} };
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return { users: [], sessions: [], musclesByUser: {} };
+function isSupabaseConfigReady(config) {
+  return Boolean(
+    config &&
+      typeof config.url === "string" &&
+      typeof config.anonKey === "string" &&
+      !config.url.includes("PASTE_YOUR_SUPABASE_PROJECT_URL_HERE") &&
+      !config.anonKey.includes("PASTE_YOUR_SUPABASE_ANON_KEY_HERE")
+  );
+}
+
+async function hydrateUserData() {
+  if (!state.authUser) return;
+  state.busy = true;
+  render();
+
+  await ensureProfile();
+  await ensureDefaultMuscles();
+  await Promise.all([loadProfile(), loadMuscles(), loadSessions()]);
+
+  state.busy = false;
+}
+
+async function ensureProfile() {
+  const { data } = await state.supabase
+    .from("profiles")
+    .select("id")
+    .eq("id", state.authUser.id)
+    .maybeSingle();
+
+  if (!data) {
+    await state.supabase.from("profiles").upsert({
+      id: state.authUser.id,
+      name: state.authUser.user_metadata?.name || "",
+    });
   }
 }
 
-function saveStore() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state.store));
+async function ensureDefaultMuscles() {
+  const { data, error } = await state.supabase
+    .from("muscle_groups")
+    .select("name, category")
+    .eq("user_id", state.authUser.id);
+
+  if (error) throw error;
+
+  const existing = new Set((data || []).map((row) => `${row.category}:${row.name.toLowerCase()}`));
+  const rows = [];
+
+  DEFAULT_PRIMARY.forEach((name) => {
+    const key = `primary:${name.toLowerCase()}`;
+    if (!existing.has(key)) rows.push({ user_id: state.authUser.id, name, category: "primary" });
+  });
+
+  DEFAULT_SECONDARY.forEach((name) => {
+    const key = `secondary:${name.toLowerCase()}`;
+    if (!existing.has(key)) rows.push({ user_id: state.authUser.id, name, category: "secondary" });
+  });
+
+  if (rows.length) {
+    await state.supabase.from("muscle_groups").insert(rows);
+  }
 }
 
-function uid(prefix) {
-  return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
+async function loadProfile() {
+  const { data, error } = await state.supabase
+    .from("profiles")
+    .select("id, name, created_at")
+    .eq("id", state.authUser.id)
+    .single();
+
+  if (error) throw error;
+  state.profile = data;
+}
+
+async function loadMuscles() {
+  const { data, error } = await state.supabase
+    .from("muscle_groups")
+    .select("id, name, category")
+    .eq("user_id", state.authUser.id)
+    .order("category", { ascending: true })
+    .order("name", { ascending: true });
+
+  if (error) throw error;
+  state.muscles = data || [];
+}
+
+async function loadSessions() {
+  const { data, error } = await state.supabase
+    .from("workout_sessions")
+    .select("id, workout_date, muscle_groups, lifts, created_at")
+    .eq("user_id", state.authUser.id)
+    .order("workout_date", { ascending: false });
+
+  if (error) throw error;
+  state.sessions = (data || []).map((row) => ({
+    id: row.id,
+    date: row.workout_date,
+    muscleGroupsSnapshot: row.muscle_groups || [],
+    lifts: row.lifts || [],
+    createdAt: row.created_at,
+  }));
+}
+
+function createLiftBuilder(overrides = {}) {
+  return {
+    liftName: "",
+    muscleGroup: "",
+    setsCount: 1,
+    unit: "kg",
+    currentSet: 1,
+    sets: [],
+    editingLiftId: null,
+    isConfigured: false,
+    pendingRepsChoice: "1",
+    pendingCustomReps: 21,
+    pendingWeight: "",
+    ...overrides,
+  };
+}
+
+function normalizeLiftBuilder(raw) {
+  const builder = createLiftBuilder(raw && typeof raw === "object" ? raw : {});
+  builder.setsCount = Math.max(1, Number.parseInt(builder.setsCount, 10) || 1);
+  builder.currentSet = Math.min(builder.setsCount, Math.max(1, Number.parseInt(builder.currentSet, 10) || 1));
+  builder.sets = Array.isArray(builder.sets) ? builder.sets : [];
+  builder.muscleGroup = typeof builder.muscleGroup === "string" ? builder.muscleGroup : "";
+  builder.unit = builder.unit === "lbs" ? "lbs" : "kg";
+  builder.pendingRepsChoice =
+    builder.pendingRepsChoice === "custom" ||
+    (Number(builder.pendingRepsChoice) >= 1 && Number(builder.pendingRepsChoice) <= 20)
+      ? String(builder.pendingRepsChoice)
+      : "1";
+  builder.pendingCustomReps = Math.max(21, Number.parseInt(builder.pendingCustomReps, 10) || 21);
+  builder.pendingWeight = builder.pendingWeight === "" ? "" : String(builder.pendingWeight ?? "");
+  builder.isConfigured = Boolean(builder.isConfigured);
+  return builder;
+}
+
+function normalizeWorkoutDraft(raw) {
+  if (!raw || typeof raw !== "object" || typeof raw.date !== "string") return null;
+  const normalizedDate = isAllowedWorkoutDate(raw.date) ? raw.date : todayIso();
+  return {
+    date: normalizedDate,
+    muscleGroupsSnapshot: Array.isArray(raw.muscleGroupsSnapshot) ? raw.muscleGroupsSnapshot : [],
+    lifts: Array.isArray(raw.lifts)
+      ? raw.lifts.map((lift) => ({
+          ...lift,
+          muscleGroup: typeof lift?.muscleGroup === "string" ? lift.muscleGroup : "",
+        }))
+      : [],
+  };
+}
+
+function workoutDraftStorageKey(userId = state.authUser?.id) {
+  return userId ? `${WORKOUT_DRAFT_STORAGE_PREFIX}:${userId}` : "";
+}
+
+function readLocalWorkoutDraft(userId = state.authUser?.id) {
+  const key = workoutDraftStorageKey(userId);
+  if (!key) return null;
+  try {
+    const record = JSON.parse(localStorage.getItem(key) || "null");
+    if (!record || record.version !== WORKOUT_DRAFT_VERSION || record.userId !== userId) return null;
+    return record;
+  } catch {
+    return null;
+  }
+}
+
+function writeLocalWorkoutDraft(record) {
+  const key = workoutDraftStorageKey(record?.userId);
+  if (!key) return false;
+  try {
+    localStorage.setItem(key, JSON.stringify(record));
+    return true;
+  } catch {
+    setDraftStatus("error");
+    return false;
+  }
+}
+
+function removeLocalWorkoutDraft(userId = state.authUser?.id) {
+  const key = workoutDraftStorageKey(userId);
+  if (!key) return;
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    // Storage cleanup is best-effort; the server draft remains authoritative.
+  }
+}
+
+function activeDraftRecord(savedAt = state.draftUpdatedAt || new Date().toISOString()) {
+  if (!state.authUser || !state.workoutDraft) return null;
+  if (!state.draftId) state.draftId = crypto.randomUUID();
+  return {
+    version: WORKOUT_DRAFT_VERSION,
+    userId: state.authUser.id,
+    savedAt,
+    discarded: false,
+    draftId: state.draftId,
+    currentView: ["workout", "submittedWorkouts"].includes(state.currentView) ? "workout" : "dashboard",
+    workoutDraft: state.workoutDraft,
+    liftBuilder: normalizeLiftBuilder(state.liftBuilder),
+  };
+}
+
+function setDraftStatus(status) {
+  state.draftStatus = status;
+  const indicator = document.getElementById("draft-save-status");
+  if (!indicator) return;
+  indicator.className = `draft-save-status ${status}`;
+  indicator.textContent = draftStatusLabel(status);
+}
+
+function draftStatusLabel(status = state.draftStatus) {
+  const labels = {
+    idle: "Auto-save ready",
+    saving: "Saving...",
+    saved: "Saved",
+    device: "Saved on this device",
+    offline: "Offline - saved on this device",
+    error: "Save needs attention",
+  };
+  return labels[status] || labels.idle;
+}
+
+function saveWorkoutDraftLocally() {
+  if (!state.authUser || !state.workoutDraft) return false;
+  state.draftUpdatedAt = new Date().toISOString();
+  return writeLocalWorkoutDraft(activeDraftRecord(state.draftUpdatedAt));
+}
+
+function queueWorkoutDraftSave() {
+  if (!state.authUser || !state.workoutDraft) return;
+  saveWorkoutDraftLocally();
+  clearTimeout(draftSyncTimer);
+
+  if (!navigator.onLine) {
+    setDraftStatus("offline");
+    return;
+  }
+  if (!state.draftBackendAvailable) {
+    setDraftStatus("device");
+    return;
+  }
+
+  setDraftStatus("saving");
+  draftSyncTimer = setTimeout(() => {
+    syncWorkoutDraftToServer().catch(() => setDraftStatus(navigator.onLine ? "error" : "offline"));
+  }, DRAFT_SYNC_DELAY_MS);
+}
+
+function isDraftBackendUnavailable(error) {
+  const code = error?.code || "";
+  const message = `${error?.message || ""} ${error?.details || ""}`.toLowerCase();
+  return ["42P01", "42883", "PGRST202", "PGRST205"].includes(code) || message.includes("workout_drafts");
+}
+
+async function syncWorkoutDraftToServer({ throwOnError = false } = {}) {
+  if (!state.authUser || !state.workoutDraft || !state.supabase) return false;
+  if (!navigator.onLine) {
+    setDraftStatus("offline");
+    return false;
+  }
+  if (!state.draftBackendAvailable) {
+    setDraftStatus("device");
+    return false;
+  }
+
+  if (draftSyncInFlight) {
+    await draftSyncInFlight;
+    if (!state.draftBackendAvailable) return false;
+    if (lastServerDraftSavedAt === state.draftUpdatedAt) return true;
+    return syncWorkoutDraftToServer({ throwOnError });
+  }
+
+  clearTimeout(draftSyncTimer);
+  const record = activeDraftRecord();
+  draftSyncInFlight = Promise.resolve(state.supabase.from("workout_drafts").upsert(
+    {
+      user_id: state.authUser.id,
+      id: record.draftId,
+      workout_date: record.workoutDraft.date,
+      muscle_groups: record.workoutDraft.muscleGroupsSnapshot,
+      lifts: record.workoutDraft.lifts,
+      lift_builder: record.liftBuilder,
+      current_view: record.currentView,
+      updated_at: record.savedAt,
+    },
+    { onConflict: "user_id" }
+  ));
+
+  let error;
+  try {
+    ({ error } = await draftSyncInFlight);
+  } finally {
+    draftSyncInFlight = null;
+  }
+
+  if (error) {
+    if (isDraftBackendUnavailable(error)) {
+      state.draftBackendAvailable = false;
+      setDraftStatus("device");
+      return false;
+    }
+    setDraftStatus(navigator.onLine ? "error" : "offline");
+    if (throwOnError) throw error;
+    return false;
+  }
+
+  lastServerDraftSavedAt = record.savedAt;
+  state.draftBackendAvailable = true;
+  setDraftStatus("saved");
+  return true;
+}
+
+async function loadServerWorkoutDraft() {
+  if (!state.authUser || !state.supabase || !navigator.onLine) return null;
+  const { data, error } = await state.supabase
+    .from("workout_drafts")
+    .select("id, workout_date, muscle_groups, lifts, lift_builder, current_view, updated_at")
+    .eq("user_id", state.authUser.id)
+    .maybeSingle();
+
+  if (error) {
+    if (isDraftBackendUnavailable(error)) state.draftBackendAvailable = false;
+    return null;
+  }
+  if (!data) return null;
+
+  state.draftBackendAvailable = true;
+  return {
+    version: WORKOUT_DRAFT_VERSION,
+    userId: state.authUser.id,
+    savedAt: data.updated_at,
+    discarded: false,
+    draftId: data.id,
+    currentView: data.current_view,
+    workoutDraft: {
+      date: data.workout_date,
+      muscleGroupsSnapshot: data.muscle_groups || [],
+      lifts: data.lifts || [],
+    },
+    liftBuilder: data.lift_builder || {},
+  };
+}
+
+async function deleteServerWorkoutDraft() {
+  if (!state.authUser || !state.supabase || !navigator.onLine || !state.draftBackendAvailable) return false;
+  const { error } = await state.supabase.from("workout_drafts").delete().eq("user_id", state.authUser.id);
+  if (error) {
+    if (isDraftBackendUnavailable(error)) state.draftBackendAvailable = false;
+    return false;
+  }
+  return true;
+}
+
+async function restoreWorkoutDraft() {
+  if (!state.authUser) return;
+  const localRecord = readLocalWorkoutDraft();
+  const serverRecord = await loadServerWorkoutDraft();
+  const localTime = Date.parse(localRecord?.savedAt || "") || 0;
+  const serverTime = Date.parse(serverRecord?.savedAt || "") || 0;
+
+  if (localRecord?.discarded && localTime >= serverTime) {
+    if (await deleteServerWorkoutDraft()) removeLocalWorkoutDraft();
+    return;
+  }
+
+  const record = serverTime > localTime ? serverRecord : localRecord || serverRecord;
+  const draft = normalizeWorkoutDraft(record?.workoutDraft);
+  if (!record || !draft) return;
+
+  state.workoutDraft = draft;
+  state.liftBuilder = normalizeLiftBuilder(record.liftBuilder);
+  state.draftId = record.draftId || crypto.randomUUID();
+  state.currentView = record.currentView === "dashboard" ? "dashboard" : "workout";
+  state.draftUpdatedAt = record.savedAt || new Date().toISOString();
+  lastServerDraftSavedAt = serverRecord && serverTime >= localTime ? serverRecord.savedAt : null;
+  state.draftStatus = serverTime >= localTime && serverRecord ? "saved" : navigator.onLine ? "saving" : "offline";
+  writeLocalWorkoutDraft(activeDraftRecord(state.draftUpdatedAt));
+
+  if (record === localRecord && navigator.onLine && state.draftBackendAvailable) {
+    syncWorkoutDraftToServer().catch(() => setDraftStatus("error"));
+  }
+}
+
+async function discardWorkoutDraft() {
+  if (!state.authUser) return;
+  clearTimeout(draftSyncTimer);
+  const userId = state.authUser.id;
+  const discardedAt = new Date().toISOString();
+  writeLocalWorkoutDraft({
+    version: WORKOUT_DRAFT_VERSION,
+    userId,
+    savedAt: discardedAt,
+    discarded: true,
+  });
+
+  state.workoutDraft = null;
+  state.liftBuilder = null;
+  state.draftUpdatedAt = null;
+  state.draftId = null;
+  lastServerDraftSavedAt = null;
+  state.draftStatus = "idle";
+  state.currentView = "dashboard";
+  render();
+
+  if (await deleteServerWorkoutDraft()) removeLocalWorkoutDraft(userId);
+}
+
+async function clearWorkoutDraftPersistence({ deleteServer = true } = {}) {
+  clearTimeout(draftSyncTimer);
+  const userId = state.authUser?.id;
+  if (deleteServer) await deleteServerWorkoutDraft();
+  removeLocalWorkoutDraft(userId);
+  state.draftUpdatedAt = null;
+  state.draftId = null;
+  lastServerDraftSavedAt = null;
+  state.draftStatus = "idle";
+}
+
+function registerDraftLifecycleHandlers() {
+  if (draftLifecycleRegistered) return;
+  draftLifecycleRegistered = true;
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "hidden" || !state.workoutDraft) return;
+    saveWorkoutDraftLocally();
+    syncWorkoutDraftToServer().catch(() => setDraftStatus(navigator.onLine ? "error" : "offline"));
+  });
+
+  window.addEventListener("beforeunload", () => {
+    if (state.workoutDraft) saveWorkoutDraftLocally();
+  });
+
+  window.addEventListener("online", async () => {
+    if (!state.workoutDraft) {
+      const localRecord = readLocalWorkoutDraft();
+      if (localRecord?.discarded) {
+        state.draftBackendAvailable = true;
+        if (await deleteServerWorkoutDraft()) removeLocalWorkoutDraft();
+      }
+      return;
+    }
+    state.draftBackendAvailable = true;
+    setDraftStatus("saving");
+    syncWorkoutDraftToServer().catch(() => setDraftStatus("error"));
+  });
+
+  window.addEventListener("offline", () => {
+    if (state.workoutDraft) setDraftStatus("offline");
+  });
+}
+
+function loadTheme() {
+  const saved = localStorage.getItem(THEME_KEY);
+  return ["dark", "pastel", "royal"].includes(saved) ? saved : "dark";
+}
+
+function saveTheme(theme) {
+  state.theme = theme;
+  localStorage.setItem(THEME_KEY, theme);
+}
+
+function loadButtonSoundsPreference() {
+  try {
+    return localStorage.getItem(BUTTON_SOUND_KEY) !== "off";
+  } catch {
+    return true;
+  }
+}
+
+function saveButtonSoundsPreference(enabled) {
+  state.buttonSoundsEnabled = enabled;
+  try {
+    localStorage.setItem(BUTTON_SOUND_KEY, enabled ? "on" : "off");
+  } catch {
+    // Sound controls still work for this visit when browser storage is unavailable.
+  }
+}
+
+function registerButtonSounds() {
+  if (buttonSoundsRegistered) return;
+  buttonSoundsRegistered = true;
+
+  // Capture before a button's action rerenders the app. Radio/checkbox inputs
+  // receive the label's forwarded click, so label taps only make one sound.
+  document.addEventListener("click", (event) => {
+    if (!event.isTrusted) return;
+    const control = event.target?.closest?.(
+      'button, [role="button"], input[type="button"], input[type="submit"], input[type="reset"], input[type="radio"], input[type="checkbox"]'
+    );
+    if (
+      !control?.closest("#app") ||
+      control.matches(':disabled, [aria-disabled="true"]') ||
+      control.closest("[inert]") ||
+      control.dataset.clickSound === "off"
+    ) return;
+    void playButtonSound();
+  }, { capture: true });
+}
+
+async function playButtonSound() {
+  if (!state.buttonSoundsEnabled || document.visibilityState === "hidden") return;
+  const requestedAt = performance.now();
+  if (requestedAt - lastButtonSoundAt < 50) return;
+  lastButtonSoundAt = requestedAt;
+
+  try {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) return;
+    if (!buttonAudioContext || buttonAudioContext.state === "closed") {
+      buttonAudioContext = new AudioContextClass({ latencyHint: "interactive" });
+    }
+    const context = buttonAudioContext;
+    // Creating/resuming here keeps audio tied to a user gesture on mobile too.
+    if (context.state !== "running") await context.resume();
+    if (
+      !state.buttonSoundsEnabled ||
+      context.state !== "running" ||
+      document.visibilityState === "hidden" ||
+      performance.now() - requestedAt > 200
+    ) return;
+
+    const tone = context.createOscillator();
+    const volume = context.createGain();
+    const start = context.currentTime;
+    tone.type = "triangle";
+    tone.frequency.setValueAtTime(560, start);
+    tone.frequency.exponentialRampToValueAtTime(328, start + 0.017);
+    volume.gain.setValueAtTime(0, start);
+    volume.gain.linearRampToValueAtTime(0.1224, start + 0.0015);
+    volume.gain.exponentialRampToValueAtTime(0.001, start + 0.023);
+    volume.gain.linearRampToValueAtTime(0, start + 0.027);
+    tone.connect(volume);
+    volume.connect(context.destination);
+    tone.onended = () => {
+      tone.disconnect();
+      volume.disconnect();
+    };
+    tone.start(start);
+    tone.stop(start + 0.03);
+  } catch {
+    // Optional feedback must never interrupt logging a workout.
+  }
 }
 
 function todayIso() {
@@ -48,9 +663,28 @@ function todayIso() {
   return `${y}-${m}-${day}`;
 }
 
+function isAllowedWorkoutDate(value) {
+  if (typeof value !== "string" || !/^[1-9]\d{3}-\d{2}-\d{2}$/.test(value)) return false;
+  if (toIso(parseIso(value)) !== value) return false;
+  return ALLOW_ANY_WORKOUT_DATE || [todayIso(), yesterdayIso()].includes(value);
+}
+
+function yesterdayIso() {
+  const yesterday = parseIso(todayIso());
+  yesterday.setDate(yesterday.getDate() - 1);
+  return toIso(yesterday);
+}
+
 function parseIso(iso) {
   const [y, m, d] = iso.split("-").map(Number);
   return new Date(y, m - 1, d);
+}
+
+function toIso(date) {
+  const y = date.getFullYear();
+  const m = `${date.getMonth() + 1}`.padStart(2, "0");
+  const d = `${date.getDate()}`.padStart(2, "0");
+  return `${y}-${m}-${d}`;
 }
 
 function formatDate(iso) {
@@ -63,75 +697,54 @@ function formatDate(iso) {
 }
 
 function weekStartMonday(date) {
-  const c = new Date(date.getFullYear(), date.getMonth(), date.getDate());
-  const day = c.getDay();
+  const copy = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  const day = copy.getDay();
   const offset = day === 0 ? -6 : 1 - day;
-  c.setDate(c.getDate() + offset);
-  return c;
+  copy.setDate(copy.getDate() + offset);
+  return copy;
 }
 
-function getUserSessions(userId) {
-  return state.store.sessions
-    .filter((s) => s.userId === userId)
-    .sort((a, b) => (a.date < b.date ? 1 : -1));
+function escapeHtml(text) {
+  return String(text || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }
 
-function getUserMuscles(userId) {
-  if (!state.store.musclesByUser[userId]) {
-    state.store.musclesByUser[userId] = {
-      primary: [...DEFAULT_PRIMARY],
-      secondary: [...DEFAULT_SECONDARY],
-      customPrimary: [],
-      customSecondary: [],
-    };
-    saveStore();
+function getMusclesByCategory(category) {
+  return state.muscles.filter((row) => row.category === category);
+}
+
+function normalizeMuscleName(name) {
+  return String(name || "").trim().toLowerCase();
+}
+
+function getSessionTrainedMuscles(session) {
+  const assignedMuscles = (session.lifts || [])
+    .map((lift) => String(lift?.muscleGroup || "").trim())
+    .filter(Boolean);
+  const source = assignedMuscles.length ? assignedMuscles : session.muscleGroupsSnapshot || [];
+  return [...new Set(source)];
+}
+
+function getSessionLiftsForMuscle(session, muscleName) {
+  const target = normalizeMuscleName(muscleName);
+  const lifts = session.lifts || [];
+  const hasAssignments = lifts.some((lift) => normalizeMuscleName(lift?.muscleGroup));
+
+  if (hasAssignments) {
+    return lifts.filter((lift) => normalizeMuscleName(lift?.muscleGroup) === target);
   }
-  const existing = state.store.musclesByUser[userId];
-  if (Array.isArray(existing)) {
-    state.store.musclesByUser[userId] = {
-      primary: [...DEFAULT_PRIMARY],
-      secondary: [...DEFAULT_SECONDARY],
-      customPrimary: existing.filter((m) => !DEFAULT_PRIMARY.includes(m)),
-      customSecondary: [],
-    };
-    saveStore();
-  }
 
-  normalizeLegacySecondaryNames(existing);
-  return state.store.musclesByUser[userId];
-}
-
-function setUserMuscles(userId, muscles) {
-  state.store.musclesByUser[userId] = muscles;
-  saveStore();
-}
-
-function getAllMuscles(userId) {
-  const groups = getUserMuscles(userId);
-  return [...groups.primary, ...groups.secondary, ...groups.customPrimary, ...groups.customSecondary];
-}
-
-function normalizeLegacySecondaryNames(groups) {
-  if (!groups || !Array.isArray(groups.secondary)) return;
-  const replaceMap = {
-    bicep: "Biceps",
-    tricep: "Triceps",
-    forearm: "Forearms",
-  };
-  let changed = false;
-  groups.secondary = groups.secondary.map((name) => {
-    const key = String(name || "").trim().toLowerCase();
-    if (replaceMap[key]) {
-      changed = true;
-      return replaceMap[key];
-    }
-    return name;
-  });
-  if (changed) saveStore();
+  const legacyMuscles = [...new Set((session.muscleGroupsSnapshot || []).map(normalizeMuscleName).filter(Boolean))];
+  return legacyMuscles.length === 1 && legacyMuscles[0] === target ? lifts : [];
 }
 
 function computeStreak(uniqueDatesAsc) {
   if (!uniqueDatesAsc.length) return { currentStreak: 0, longestStreak: 0 };
+
   let longest = 1;
   let run = 1;
   let endingRun = 1;
@@ -148,118 +761,120 @@ function computeStreak(uniqueDatesAsc) {
     }
     if (i === uniqueDatesAsc.length - 1) endingRun = run;
   }
+
   if (run > longest) longest = run;
 
-  const last = parseIso(uniqueDatesAsc[uniqueDatesAsc.length - 1]);
+  const lastDate = parseIso(uniqueDatesAsc[uniqueDatesAsc.length - 1]);
   const now = parseIso(todayIso());
-  const sinceLast = Math.floor((now - last) / 86400000);
-  return { currentStreak: sinceLast >= 7 ? 0 : endingRun, longestStreak: longest };
+  const daysSinceLast = Math.floor((now - lastDate) / 86400000);
+  return { currentStreak: daysSinceLast >= 7 ? 0 : endingRun, longestStreak: longest };
 }
 
-function computeAnalytics(userId) {
-  const sessions = getUserSessions(userId);
-  const uniqueDates = [...new Set(sessions.map((s) => s.date))].sort();
-  const today = parseIso(todayIso());
-  const weekStart = weekStartMonday(today);
-  const month = today.getMonth();
-  const year = today.getFullYear();
+function computeWeeklyStreaks(uniqueDatesAsc) {
+  if (!uniqueDatesAsc.length) return { weeklyStreak: 0, longestWeeklyStreak: 0 };
 
-  const weekDays = new Set();
-  const monthDays = new Set();
-  const weekMuscles = {};
-  const monthMuscles = {};
-
-  sessions.forEach((s) => {
-    const d = parseIso(s.date);
-    if (d >= weekStart && d <= today) {
-      weekDays.add(s.date);
-      s.muscleGroupsSnapshot.forEach((m) => (weekMuscles[m] = (weekMuscles[m] || 0) + 1));
-    }
-    if (d.getMonth() === month && d.getFullYear() === year) {
-      monthDays.add(s.date);
-      s.muscleGroupsSnapshot.forEach((m) => (monthMuscles[m] = (monthMuscles[m] || 0) + 1));
-    }
-  });
-
-  const gameStats = computeGameStats(uniqueDates);
-
-  return {
-    sessions,
-    ...computeStreak(uniqueDates),
-    ...gameStats,
-    weekGymDays: weekDays.size,
-    monthGymDays: monthDays.size,
-    weekMuscles,
-    monthMuscles,
-  };
-}
-
-function computeGameStats(uniqueDatesAsc) {
-  const gymDays = uniqueDatesAsc.length;
-  const xp = gymDays * 10;
-  const level = Math.floor(xp / 100) + 1;
-  const xpIntoLevel = xp % 100;
-  const weeklyStreak = computeWeeklyStreak(uniqueDatesAsc);
-  return { xp, level, xpIntoLevel, weeklyStreak };
-}
-
-function computeWeeklyStreak(uniqueDatesAsc) {
-  if (!uniqueDatesAsc.length) return 0;
-
-  const activeWeekKeys = new Set();
-  uniqueDatesAsc.forEach((iso) => {
-    const weekStart = weekStartMonday(parseIso(iso));
-    activeWeekKeys.add(toIso(weekStart));
-  });
-
+  const activeWeekKeys = new Set(
+    uniqueDatesAsc.map((iso) => toIso(weekStartMonday(parseIso(iso))))
+  );
   const sortedWeekKeys = [...activeWeekKeys].sort();
-  let streak = 1;
-  let bestEnding = 1;
+
+  let run = 1;
+  let longest = 1;
   for (let i = 1; i < sortedWeekKeys.length; i += 1) {
     const prev = parseIso(sortedWeekKeys[i - 1]);
     const cur = parseIso(sortedWeekKeys[i]);
-    const gapDays = Math.floor((cur - prev) / 86400000);
-    if (gapDays === 7) {
-      streak += 1;
-    } else {
-      streak = 1;
-    }
-    if (i === sortedWeekKeys.length - 1) {
-      bestEnding = streak;
-    }
+    const gap = Math.floor((cur - prev) / 86400000);
+    run = gap === 7 ? run + 1 : 1;
+    if (run > longest) longest = run;
   }
 
   const latestWeek = parseIso(sortedWeekKeys[sortedWeekKeys.length - 1]);
   const currentWeek = weekStartMonday(parseIso(todayIso()));
   const gapFromCurrent = Math.floor((currentWeek - latestWeek) / 86400000);
-  if (gapFromCurrent > 7) return 0;
-  return bestEnding;
+  return {
+    weeklyStreak: gapFromCurrent > 7 ? 0 : run,
+    longestWeeklyStreak: longest,
+  };
 }
 
-function toIso(date) {
-  const y = date.getFullYear();
-  const m = `${date.getMonth() + 1}`.padStart(2, "0");
-  const d = `${date.getDate()}`.padStart(2, "0");
-  return `${y}-${m}-${d}`;
+function computeAnalytics() {
+  const uniqueDates = [...new Set(state.sessions.map((row) => row.date))].sort();
+  const today = parseIso(todayIso());
+  const last30Start = new Date(today);
+  last30Start.setDate(today.getDate() - 29);
+  const month = today.getMonth();
+  const year = today.getFullYear();
+
+  const last30Days = new Set();
+  const monthDays = new Set();
+  const last30Muscles = {};
+  const monthMuscles = {};
+
+  state.sessions.forEach((session) => {
+    const date = parseIso(session.date);
+    if (date >= last30Start && date <= today) {
+      last30Days.add(session.date);
+      getSessionTrainedMuscles(session).forEach((name) => {
+        last30Muscles[name] = (last30Muscles[name] || 0) + 1;
+      });
+    }
+    if (date.getMonth() === month && date.getFullYear() === year) {
+      monthDays.add(session.date);
+      getSessionTrainedMuscles(session).forEach((name) => {
+        monthMuscles[name] = (monthMuscles[name] || 0) + 1;
+      });
+    }
+  });
+
+  const xp = uniqueDates.length * 20;
+  return {
+    sessions: state.sessions,
+    last30GymDays: last30Days.size,
+    monthGymDays: monthDays.size,
+    last30Muscles,
+    monthMuscles,
+    xp,
+    level: Math.floor(xp / 100) + 1,
+    xpIntoLevel: xp % 100,
+    ...computeWeeklyStreaks(uniqueDates),
+    ...computeStreak(uniqueDates),
+  };
 }
 
 function topPair(mapObj) {
   return Object.entries(mapObj).sort((a, b) => b[1] - a[1])[0];
 }
 
-function escapeHtml(text) {
-  return text
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
 function render() {
-  const app = document.getElementById("app");
   document.body.dataset.theme = state.theme;
-  app.innerHTML = state.user ? renderAuthed() : renderAuth();
+  const app = document.getElementById("app");
+
+  if (state.loading) {
+    app.innerHTML = `
+      <main class="shell auth-shell">
+        <section class="auth-panel">
+          <h1>GymBoard</h1>
+          <p>Loading your gym data...</p>
+        </section>
+      </main>
+    `;
+    return;
+  }
+
+  if (state.setupError) {
+    app.innerHTML = `
+      <main class="shell auth-shell">
+        <section class="auth-panel">
+          <h1>GymBoard</h1>
+          <p>${escapeHtml(state.setupError)}</p>
+          <p>Open <code>supabase.config.js</code>, paste your Supabase URL and anon key, then refresh.</p>
+        </section>
+      </main>
+    `;
+    return;
+  }
+
+  app.innerHTML = state.authUser ? renderAuthed() : renderAuth();
   bindEvents();
 }
 
@@ -268,9 +883,9 @@ function renderThemePicker() {
     <div class="theme-picker-wrap">
       <span class="theme-label">Theme:</span>
       <div class="theme-picker" role="group" aria-label="Theme picker">
-      <button type="button" class="theme-dot ${state.theme === "dark" ? "active" : ""}" data-theme="dark" title="Current dark-grey"></button>
-      <button type="button" class="theme-dot pastel ${state.theme === "pastel" ? "active" : ""}" data-theme="pastel" title="Pastel pink"></button>
-      <button type="button" class="theme-dot royal ${state.theme === "royal" ? "active" : ""}" data-theme="royal" title="Purple and brown"></button>
+        <button type="button" class="theme-dot ${state.theme === "dark" ? "active" : ""}" data-theme="dark" title="Current dark-grey"></button>
+        <button type="button" class="theme-dot pastel ${state.theme === "pastel" ? "active" : ""}" data-theme="pastel" title="Pastel pink"></button>
+        <button type="button" class="theme-dot royal ${state.theme === "royal" ? "active" : ""}" data-theme="royal" title="Purple and brown"></button>
       </div>
     </div>
   `;
@@ -280,24 +895,25 @@ function renderAuth() {
   return `
     <main class="shell auth-shell">
       <section class="auth-panel">
-        <div class="theme-row">
-          ${renderThemePicker()}
+        <div class="theme-row">${renderThemePicker()}</div>
+        <div class="auth-brand">
+          <h1>GymBoard</h1>
+          <p class="brand-tagline">Every Workout. Every Set. One Board.</p>
+          <p class="brand-description">Track your workouts, sets, reps, and progress—all in one place.</p>
         </div>
-        <h1>Gym Tracker</h1>
-        <p>Track workouts, body-part balance, and streaks.</p>
         <div class="auth-grid">
           <form id="register-form" class="panel">
             <h2>Create account</h2>
             <label>Name<input type="text" name="name" required /></label>
             <label>Email<input type="email" name="email" required /></label>
-            <label>Password<input type="password" name="password" required minlength="4" /></label>
-            <button type="submit">Register</button>
+            <label>Password<input type="password" name="password" required minlength="6" /></label>
+            <button type="submit">${state.busy ? "Creating..." : "Register"}</button>
           </form>
           <form id="login-form" class="panel">
             <h2>Login</h2>
             <label>Email<input type="email" name="email" required /></label>
             <label>Password<input type="password" name="password" required /></label>
-            <button type="submit">Login</button>
+            <button type="submit">${state.busy ? "Checking..." : "Login"}</button>
           </form>
         </div>
       </section>
@@ -306,22 +922,26 @@ function renderAuth() {
 }
 
 function renderAuthed() {
-  const analytics = computeAnalytics(state.user.id);
-  const profileName = state.user.name && state.user.name.trim() ? state.user.name : "No name yet";
+  const analytics = computeAnalytics();
+  const displayName = state.profile?.name?.trim() || "Gym Athlete";
   return `
     <main class="shell">
       <header class="topbar">
         <div>
-          <h1>Gym Tracker</h1>
-          <p>${escapeHtml(profileName)} (${escapeHtml(state.user.email)})</p>
-          ${renderThemePicker()}
+          <h1>GymBoard</h1>
+          <p class="brand-tagline">Every Workout. Every Set. One Board.</p>
+          <p class="header-user-name">${escapeHtml(displayName)}</p>
+          <div class="header-actions">
+            ${renderThemePicker()}
+            <button id="go-settings" class="ghost settings-button">Settings</button>
+          </div>
         </div>
-        <button id="logout-btn" class="ghost">Logout</button>
+        <button id="logout-btn" class="ghost">${state.busy ? "Working..." : "Logout"}</button>
       </header>
       <nav class="tabs">
         ${tab("dashboard", "Dashboard")}
-        ${tab("streak", "Streak")}
-        ${tab("muscles", "Muscle Groups")}
+        ${tab("streak", "Analytics")}
+        ${tab("muscles", "Add Muscle Group")}
       </nav>
       <section class="content">${renderView(analytics)}</section>
     </main>
@@ -329,13 +949,18 @@ function renderAuthed() {
 }
 
 function tab(id, label) {
-  return `<button class="tab ${state.currentView === id ? "active" : ""}" data-tab="${id}">${label}</button>`;
+  const isActive = state.currentView === id || (id === "streak" && state.currentView === "muscleAnalyticsDetail");
+  return `<button class="tab ${isActive ? "active" : ""}" data-tab="${id}">${label}</button>`;
 }
 
 function renderView(analytics) {
   if (state.currentView === "dashboard") return renderDashboard(analytics);
   if (state.currentView === "workout") return renderWorkout();
+  if (state.currentView === "submittedWorkouts") return renderSubmittedWorkoutsPage();
+  if (state.currentView === "calendarDay") return renderCalendarDayPage();
   if (state.currentView === "streak") return renderStreak(analytics);
+  if (state.currentView === "muscleAnalyticsDetail") return renderMuscleAnalyticsDetail();
+  if (state.currentView === "settings") return renderSettings();
   return renderMuscles();
 }
 
@@ -343,67 +968,89 @@ function metric(label, value) {
   return `<article class="metric"><h3>${label}</h3><p>${value}</p></article>`;
 }
 
+function fireIcon(isLit) {
+  return `
+    <span class="fire-icon ${isLit ? "fire-lit" : "fire-dim"}" aria-hidden="true">
+      <svg viewBox="0 0 24 24" role="img">
+        <path d="M12.2 22c-4.4 0-7.5-2.9-7.5-7 0-2.8 1.5-5 3.4-6.8.7-.7 1.6-1.7 1.7-3.3 0-.6.7-.9 1.2-.5 1.9 1.4 3 3.2 3.2 5.5.8-.7 1.3-1.7 1.5-2.8.1-.7.9-1 1.4-.5 1.6 1.5 2.3 3.4 2.3 5.7 0 5.7-3.9 9.7-7.2 9.7Z" />
+        <path class="fire-core" d="M12 20c-2.1 0-3.6-1.4-3.6-3.3 0-1.5.9-2.8 2.1-3.8.5-.4.9-.9 1-1.7 0-.4.5-.6.8-.3 1.3 1 2.1 2.4 2.1 4 0 3-1.4 5.1-2.4 5.1Z" />
+      </svg>
+    </span>
+  `;
+}
+
+function streakMetric(label, value, isLit) {
+  return `<article class="metric streak-metric">${fireIcon(isLit)}<h3>${label}</h3><p>${value}</p></article>`;
+}
+
 function renderDashboard(analytics) {
-  const top = topPair(analytics.weekMuscles);
+  const recentWorkoutDate = state.sessions[0]?.date;
+  const recentWorkouts = recentWorkoutDate ? state.sessions.filter((session) => session.date === recentWorkoutDate) : [];
+  const top = topPair(analytics.last30Muscles);
   const sharePayload = getSharePayload(analytics, top);
+  const displayName = state.profile?.name?.trim() || "Gym Athlete";
   return `
     <div class="metrics">
-      ${metric("Current Streak", `${analytics.currentStreak} gym days`)}
-      ${metric("Longest Streak", `${analytics.longestStreak} gym days`)}
-      ${metric("Gym Days This Week", analytics.weekGymDays)}
+      ${streakMetric("Current Streak", `${analytics.currentStreak} gym days`, analytics.currentStreak > 0)}
+      ${streakMetric("Longest Streak", `${analytics.longestStreak} gym days`, analytics.longestStreak > 0)}
+      ${streakMetric(
+        "Longest Weekly Streak",
+        `${analytics.longestWeeklyStreak} week${analytics.longestWeeklyStreak === 1 ? "" : "s"}`,
+        analytics.longestWeeklyStreak > 0
+      )}
       ${metric("Gym Days This Month", analytics.monthGymDays)}
     </div>
-    <div class="panel">
-      <h2>Streak Game</h2>
-      <div class="game-grid">
-        <div class="game-stat"><strong>XP</strong><span>${analytics.xp}</span></div>
-        <div class="game-stat"><strong>Level</strong><span>${analytics.level}</span></div>
-        <div class="game-stat"><strong>Weekly Streak</strong><span>${analytics.weeklyStreak}</span></div>
-      </div>
-      <p>${analytics.xpIntoLevel}/100 XP to next level</p>
-      <div class="xp-track"><div class="xp-fill" style="width:${analytics.xpIntoLevel}%"></div></div>
-      <p>Rule: +10 XP per gym day. Weekly streak counts active weeks from Monday to Sunday.</p>
+    <div class="dashboard-cta-row">
+      <p class="grind-welcome">Welcome to the Grind, ${escapeHtml(displayName)}</p>
+      <button id="go-workout" class="cta-add-workout">+ Add Workout</button>
     </div>
-    <div class="dashboard-row">
-      <div class="panel">
-        <h2>Most Trained This Week</h2>
-        <p>${top ? `${top[0]} (${top[1]} times)` : "No workouts yet"}</p>
-        <button id="go-workout" class="cta-add-workout">+ Add Workout</button>
+    ${state.workoutDraft ? renderWorkoutResumeCard() : ""}
+    <div class="panel">
+      <div class="panel-heading-row">
+        <h2>Streak Game</h2>
+        <button class="rule-button" type="button" aria-label="Show streak rule">?</button>
+        <div class="rule-popover">
+          <p>Rest days are allowed.</p>
+          <p>Gym-day streak ends after 7 days with no workout.</p>
+          <p>Weekly streak counts active weeks from Monday to Sunday.</p>
+        </div>
       </div>
-      <div class="panel">
-        <h2>Recent Sessions</h2>
-        ${renderSessions(analytics.sessions.slice(0, 6))}
+      <div class="game-grid">
+        <div class="game-stat"><strong>Level</strong><span>${analytics.level}</span></div>
+        <div class="game-stat streak-game-stat">${fireIcon(analytics.weeklyStreak > 0)}<strong>Weekly Gym Streak</strong><span>${analytics.weeklyStreak}</span></div>
       </div>
+      <p>${analytics.xp} total XP - ${analytics.xpIntoLevel}/100 XP to next level</p>
+      <div class="xp-track"><div class="xp-fill" style="width:${analytics.xpIntoLevel}%"></div></div>
+      <p>Rule: +20 XP per gym session.</p>
+    </div>
+    <div class="panel">
+      <h2>Recent Sessions</h2>
+      ${renderSessions(recentWorkouts)}
     </div>
     <div class="panel">
       <h2>Monthly Gym Calendar</h2>
-      ${renderMonthlyCalendar(analytics.sessions)}
+      <div id="monthly-calendar" class="monthly-calendar">${renderMonthlyCalendar(state.sessions)}</div>
     </div>
     <div class="panel">
-      <h2>Share This Week</h2>
+      <h2>Share My Personal Gym Card</h2>
       ${renderShareCard(sharePayload)}
       <div class="inline-actions">
         <button id="copy-share-summary">Copy Summary</button>
-        <button id="download-share-card" class="cta-add-workout">Download Card</button>
+        <button id="download-share-card">Download Card</button>
       </div>
-    </div>
-    <div class="panel">
-      <h2>Profile</h2>
-      <form id="profile-form">
-        <label>Name<input type="text" name="name" value="${escapeHtml(state.user.name || "")}" required /></label>
-        <button type="submit">Save Name</button>
-      </form>
     </div>
   `;
 }
 
 function getSharePayload(analytics, topMuscle) {
-  const displayName = state.user?.name?.trim() ? state.user.name.trim() : state.user?.email || "Gym User";
+  const name = state.profile?.name?.trim() || "Gym Athlete";
   return {
-    name: displayName,
-    weeklyStreak: analytics.weeklyStreak,
+    name,
     currentStreak: analytics.currentStreak,
-    weekGymDays: analytics.weekGymDays,
+    longestStreak: analytics.longestStreak,
+    weeklyStreak: analytics.weeklyStreak,
+    longestWeeklyStreak: analytics.longestWeeklyStreak,
+    last30GymDays: analytics.last30GymDays,
     topMuscle: topMuscle ? `${topMuscle[0]} (${topMuscle[1]}x)` : "No workouts yet",
     level: analytics.level,
     xp: analytics.xp,
@@ -413,50 +1060,259 @@ function getSharePayload(analytics, topMuscle) {
 
 function renderShareCard(payload) {
   return `
-    <article class="share-card" id="share-card">
-      <h3>${escapeHtml(payload.name)} - Weekly Gym Update</h3>
-      <div class="share-grid">
-        <div><strong>Current Streak</strong><span>${payload.currentStreak} days</span></div>
-        <div><strong>Weekly Streak</strong><span>${payload.weeklyStreak} weeks</span></div>
-        <div><strong>Gym Days</strong><span>${payload.weekGymDays} this week</span></div>
-        <div><strong>Top Muscle</strong><span>${escapeHtml(payload.topMuscle)}</span></div>
-        <div><strong>Level</strong><span>${payload.level}</span></div>
-        <div><strong>XP</strong><span>${payload.xp} total (${payload.xpIntoLevel}/100)</span></div>
+    <article class="share-card">
+      <header class="share-card-header">
+        <h3>The Gym Grind</h3>
+        <p>${escapeHtml(payload.name)} - Personal Gym Update</p>
+      </header>
+      <div class="share-card-level">
+        <strong>Level ${payload.level}</strong>
+        <span>XP ${payload.xp} total (${payload.xpIntoLevel}/100)</span>
       </div>
+      <div class="share-card-progress" role="progressbar" aria-label="Progress to next level" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${payload.xpIntoLevel}">
+        <div style="width:${payload.xpIntoLevel}%"></div>
+      </div>
+      <div class="share-stat-columns">
+        <div class="share-stat-panel">
+          <div class="share-stat-row"><strong>Current Streak</strong><span>${payload.currentStreak}</span></div>
+          <div class="share-stat-row"><strong>Weekly Streak</strong><span>${payload.weeklyStreak}</span></div>
+          <div class="share-stat-row"><strong>Gym Days (Last 30D)</strong><span>${payload.last30GymDays}</span></div>
+        </div>
+        <div class="share-stat-panel">
+          <div class="share-stat-row"><strong>Longest Streak</strong><span>${payload.longestStreak}</span></div>
+          <div class="share-stat-row"><strong>Longest Weekly Streak</strong><span>${payload.longestWeeklyStreak}</span></div>
+          <div class="share-stat-row"><strong>Top Muscle</strong><span>${escapeHtml(payload.topMuscle)}</span></div>
+        </div>
+      </div>
+      <footer>Generated by GymBoard</footer>
     </article>
   `;
 }
 
+function getCalendarBounds() {
+  const end = parseIso(`${todayIso().slice(0, 7)}-01`);
+  // Auth records the actual signup date; the profile timestamp is a fallback.
+  for (const timestamp of [state.authUser?.created_at, state.profile?.created_at]) {
+    if (typeof timestamp !== "string" || !timestamp.trim()) continue;
+    const createdAt = new Date(timestamp);
+    if (Number.isNaN(createdAt.getTime()) || createdAt.getFullYear() < 1000) continue;
+    const start = new Date(createdAt.getFullYear(), createdAt.getMonth(), 1);
+    if (start <= end) return { start, end };
+  }
+  return { start: end, end };
+}
+
+function clampCalendarMonth(date) {
+  const { start, end } = getCalendarBounds();
+  if (Number.isNaN(date.getTime())) return end;
+  const month = new Date(date.getFullYear(), date.getMonth(), 1);
+  return month < start ? start : month > end ? end : month;
+}
+
+function getCalendarMonth() {
+  const selectedMonth = state.calendarMonth;
+  const month = /^[1-9]\d{3}-(0[1-9]|1[0-2])$/.test(selectedMonth || "")
+    ? parseIso(`${selectedMonth}-01`)
+    : parseIso(`${todayIso().slice(0, 7)}-01`);
+  return clampCalendarMonth(month);
+}
+
+function getCalendarYears() {
+  const { start, end } = getCalendarBounds();
+  return Array.from({ length: end.getFullYear() - start.getFullYear() + 1 }, (_, index) => end.getFullYear() - index);
+}
+
 function renderMonthlyCalendar(sessions) {
   const today = parseIso(todayIso());
-  const year = today.getFullYear();
-  const month = today.getMonth();
-  const monthName = today.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+  const { start: firstMonth } = getCalendarBounds();
+  const selectedMonth = getCalendarMonth();
+  const year = selectedMonth.getFullYear();
+  const month = selectedMonth.getMonth();
+  const minMonth = year === firstMonth.getFullYear() ? firstMonth.getMonth() : 0;
+  const maxMonth = year === today.getFullYear() ? today.getMonth() : 11;
   const totalDays = new Date(year, month + 1, 0).getDate();
-  const gymDates = new Set(
-    sessions
-      .filter((s) => {
-        const d = parseIso(s.date);
-        return d.getFullYear() === year && d.getMonth() === month;
-      })
-      .map((s) => Number(s.date.slice(8, 10)))
+  const monthName = selectedMonth.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+  const isCurrentMonth = year === today.getFullYear() && month === today.getMonth();
+  const primaryNames = new Set(getMusclesByCategory("primary").map((muscle) => muscle.name));
+  const sessionsByDate = new Map();
+
+  sessions.forEach((session) => {
+    const date = parseIso(session.date);
+    if (date.getFullYear() !== year || date.getMonth() !== month) return;
+    if (!sessionsByDate.has(session.date)) sessionsByDate.set(session.date, []);
+    sessionsByDate.get(session.date).push(session);
+  });
+
+  return `
+    <div class="calendar-toolbar">
+      <div class="calendar-period-fields">
+        <label for="calendar-month-select">Month
+          <select id="calendar-month-select">
+            ${Array.from({ length: maxMonth - minMonth + 1 }, (_, offset) => minMonth + offset).map((index) => `
+              <option value="${index}" ${index === month ? "selected" : ""}>${new Date(2024, index, 1).toLocaleDateString(undefined, { month: "long" })}</option>
+            `).join("")}
+          </select>
+        </label>
+        <label for="calendar-year-select">Year
+          <select id="calendar-year-select">
+            ${getCalendarYears().map((optionYear) => `<option value="${optionYear}" ${optionYear === year ? "selected" : ""}>${optionYear}</option>`).join("")}
+          </select>
+        </label>
+      </div>
+      <div class="calendar-navigation" role="group" aria-label="Calendar navigation">
+        <button id="calendar-previous" class="calendar-arrow ghost" type="button" aria-label="Previous month" ${selectedMonth.getTime() === firstMonth.getTime() ? "disabled" : ""}>&larr;</button>
+        <button id="calendar-current" class="ghost" type="button" ${isCurrentMonth ? "disabled" : ""}>This Month</button>
+        <button id="calendar-next" class="calendar-arrow ghost" type="button" aria-label="Next month" ${isCurrentMonth ? "disabled" : ""}>&rarr;</button>
+      </div>
+    </div>
+    <p id="calendar-period-summary" class="calendar-period-summary" role="status" aria-live="polite" aria-atomic="true">${monthName} &middot; ${sessionsByDate.size} gym day${sessionsByDate.size === 1 ? "" : "s"}</p>
+    <div class="calendar-grid" aria-label="${escapeHtml(monthName)}">
+      ${Array.from({ length: totalDays }, (_, index) => {
+        const day = index + 1;
+        const iso = `${year}-${`${month + 1}`.padStart(2, "0")}-${`${day}`.padStart(2, "0")}`;
+        const daySessions = sessionsByDate.get(iso) || [];
+        const isGym = daySessions.length > 0;
+        const trainedPrimaryMuscles = [
+          ...new Set(
+            daySessions.flatMap((session) =>
+              getSessionTrainedMuscles(session).filter((name) => primaryNames.has(name))
+            )
+          ),
+        ];
+        const dayLabel = isGym ? trainedPrimaryMuscles.join(", ") || "Workout" : "Rest";
+        return `
+          <button class="calendar-day ${isGym ? "gym-day" : "rest-day"} ${state.selectedCalendarDate === iso ? "selected-day" : ""}" type="button" data-calendar-date="${iso}" aria-label="${escapeHtml(`${formatDate(iso)}: ${dayLabel}`)}" ${iso === todayIso() ? 'aria-current="date"' : ""}>
+            <strong>${day}</strong>
+            <span>${escapeHtml(dayLabel)}</span>
+          </button>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
+function updateCalendarMonth(date, focusId) {
+  state.calendarMonth = toIso(clampCalendarMonth(date)).slice(0, 7);
+
+  const calendar = document.getElementById("monthly-calendar");
+  if (!calendar) return;
+  // Only redraw the calendar so changing months doesn't disturb the dashboard.
+  calendar.innerHTML = renderMonthlyCalendar(state.sessions);
+  bindCalendarEvents();
+  const focusTarget = document.getElementById(focusId);
+  (focusTarget?.disabled ? document.getElementById("calendar-month-select") : focusTarget)?.focus({ preventScroll: true });
+}
+
+function bindCalendarEvents() {
+  const calendar = document.getElementById("monthly-calendar");
+  if (!calendar) return;
+  calendar.querySelector("#calendar-month-select").addEventListener("change", (event) => {
+    updateCalendarMonth(new Date(getCalendarMonth().getFullYear(), Number(event.target.value), 1), event.target.id);
+  });
+  calendar.querySelector("#calendar-year-select").addEventListener("change", (event) => {
+    updateCalendarMonth(new Date(Number(event.target.value), getCalendarMonth().getMonth(), 1), event.target.id);
+  });
+  calendar.querySelector("#calendar-previous").addEventListener("click", () => {
+    const date = getCalendarMonth();
+    updateCalendarMonth(new Date(date.getFullYear(), date.getMonth() - 1, 1), "calendar-previous");
+  });
+  calendar.querySelector("#calendar-next").addEventListener("click", () => {
+    const date = getCalendarMonth();
+    updateCalendarMonth(new Date(date.getFullYear(), date.getMonth() + 1, 1), "calendar-next");
+  });
+  calendar.querySelector("#calendar-current").addEventListener("click", () => {
+    updateCalendarMonth(parseIso(todayIso()), "calendar-current");
+  });
+  calendar.querySelectorAll("[data-calendar-date]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.selectedCalendarDate = button.dataset.calendarDate;
+      state.currentView = "calendarDay";
+      if (state.workoutDraft) queueWorkoutDraftSave();
+      render();
+    });
+  });
+}
+
+function renderCalendarDayPage() {
+  const selectedDate = state.selectedCalendarDate || todayIso();
+  const daySessions = state.sessions.filter((session) => session.date === selectedDate);
+  const muscleGroups = [...new Set(daySessions.flatMap((session) => getSessionTrainedMuscles(session)))];
+  const lifts = daySessions.flatMap((session) => session.lifts || []);
+  const totalSets = lifts.reduce((sum, lift) => sum + (lift.sets?.length || 0), 0);
+  const totalReps = lifts.reduce(
+    (sum, lift) => sum + (lift.sets || []).reduce((setSum, set) => setSum + Number(set.reps || 0), 0),
+    0
   );
 
-  const dayCells = [];
-  for (let day = 1; day <= totalDays; day += 1) {
-    const isGym = gymDates.has(day);
-    dayCells.push(`
-      <div class="calendar-day ${isGym ? "gym-day" : "rest-day"}">
-        <strong>${day}</strong>
-        <span>${isGym ? "Gym" : "Rest"}</span>
+  if (!daySessions.length) {
+    return `
+      <div class="panel calendar-page">
+        <div class="page-top-row">
+          <button id="back-dashboard" class="ghost">Back</button>
+          <span class="calendar-page-label">Monthly Gym Calendar detail</span>
+        </div>
+        <div class="calendar-detail hero-detail">
+          <h2>${formatDate(selectedDate)}</h2>
+          <p>Rest day. No workout submitted on this date.</p>
+        </div>
       </div>
-    `);
+    `;
   }
 
   return `
-    <p>${monthName}</p>
-    <div class="calendar-grid">
-      ${dayCells.join("")}
+    <div class="panel calendar-page">
+      <div class="page-top-row">
+        <button id="back-dashboard" class="ghost">Back</button>
+        <span class="calendar-page-label">Monthly Gym Calendar detail</span>
+      </div>
+      <div class="calendar-detail hero-detail">
+        <h2>${formatDate(selectedDate)}</h2>
+        <p>Complete workout detail from your saved gym session.</p>
+        <div class="detail-summary-grid">
+          <div><strong>Status</strong><span>Gym day</span></div>
+          <div><strong>Sessions</strong><span>${daySessions.length}</span></div>
+          <div><strong>Muscle Groups</strong><span>${muscleGroups.map(escapeHtml).join(", ")}</span></div>
+          <div><strong>Total Lifts</strong><span>${lifts.length}</span></div>
+          <div><strong>Total Sets</strong><span>${totalSets}</span></div>
+          <div><strong>Total Reps</strong><span>${totalReps}</span></div>
+        </div>
+      </div>
+      ${daySessions
+        .map(
+          (session, sessionIndex) => `
+            <div class="day-session-detail">
+              <div class="session-detail-heading">
+                <strong>Workout Session ${sessionIndex + 1}</strong>
+                <span>${session.createdAt ? new Date(session.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "Saved session"}</span>
+              </div>
+              <span>Muscle groups: ${getSessionTrainedMuscles(session).map(escapeHtml).join(", ")}</span>
+              ${session.lifts
+                .map(
+                  (lift, liftIndex) => `
+                    <div class="lift-detail">
+                      <strong>Lift ${liftIndex + 1}: ${escapeHtml(lift.name)} (${escapeHtml(lift.unit)})</strong>
+                      <span>${lift.sets.length} sets</span>
+                      <div class="set-detail-grid">
+                        ${lift.sets
+                          .map(
+                            (set) => `
+                              <div>
+                                <strong>Set ${set.setNumber}</strong>
+                                <span>${set.reps} reps</span>
+                                <span>${set.weight} ${escapeHtml(lift.unit)}</span>
+                              </div>
+                            `
+                          )
+                          .join("")}
+                      </div>
+                    </div>
+                  `
+                )
+                .join("")}
+            </div>
+          `
+        )
+        .join("")}
     </div>
   `;
 }
@@ -465,93 +1321,223 @@ function renderSessions(sessions) {
   if (!sessions.length) return "<p>No session submitted yet.</p>";
   return sessions
     .map(
-      (s) => `
-      <div class="list-item">
-        <strong>${formatDate(s.date)}</strong>
-        <span>${s.muscleGroupsSnapshot.join(", ")}</span>
-        <span>${s.lifts.length} lifts</span>
-      </div>
-    `
+      (session) => `
+        <div class="list-item">
+          <strong>${formatDate(session.date)}</strong>
+          <span>${getSessionTrainedMuscles(session).map(escapeHtml).join(", ")}</span>
+          <span>${session.lifts.length} lifts</span>
+        </div>
+      `
     )
     .join("");
 }
 
 function ensureWorkoutState() {
   if (!state.workoutDraft) {
-    state.workoutDraft = { date: todayIso(), muscleGroupsSnapshot: [], lifts: [] };
+    state.workoutDraft = {
+      date: todayIso(),
+      muscleGroupsSnapshot: [],
+      lifts: [],
+    };
   }
+
   if (!state.liftBuilder) {
-    state.liftBuilder = { liftName: "", setsCount: 1, unit: "kg", currentSet: 1, sets: [] };
+    state.liftBuilder = createLiftBuilder();
+  }
+
+  if (!isAllowedWorkoutDate(state.workoutDraft.date)) {
+    state.workoutDraft.date = todayIso();
   }
 }
 
 function renderWorkout() {
   ensureWorkoutState();
-  const muscles = getAllMuscles(state.user.id);
+  const primaryMuscles = getMusclesByCategory("primary");
+  const secondaryMuscles = getMusclesByCategory("secondary");
   const draft = state.workoutDraft;
   const builder = state.liftBuilder;
+  const today = todayIso();
+  const yesterday = yesterdayIso();
+  const builderMuscleIsValid = draft.muscleGroupsSnapshot.includes(builder.muscleGroup);
+  const hasUnassignedLifts = draft.lifts.some(
+    (lift) => !lift.muscleGroup || !draft.muscleGroupsSnapshot.includes(lift.muscleGroup)
+  );
+  const usesCustomSetCount = builder.setsCount > 10;
+  const usesCustomReps = builder.pendingRepsChoice === "custom";
+
   return `
-    <div class="panel">
-      <button id="back-dashboard" class="ghost">Back</button>
+    <div class="workout-nav">
+      <button id="back-dashboard" class="back-button" type="button" aria-label="Back to dashboard">
+        <span aria-hidden="true">&larr;</span>
+        Back
+      </button>
+      <button id="go-submitted-workouts" class="ghost" type="button">Submitted Workouts</button>
+      <div class="draft-save-controls">
+        <span id="draft-save-status" class="draft-save-status ${state.draftStatus}">${draftStatusLabel()}</span>
+        <button class="danger compact-button" type="button" data-discard-workout>Discard</button>
+      </div>
     </div>
     <form id="muscle-select-form" class="panel">
-      <h2>Workout Tracker</h2>
-      <p><strong>Date:</strong> ${formatDate(draft.date)}</p>
-      <p>What muscle group do you want to train?</p>
-      <div class="muscle-card-grid">
-        ${muscles
-          .map(
-            (m, i) => `
-          <label class="muscle-card" for="muscle_${i}">
-            <input id="muscle_${i}" type="checkbox" name="muscles" value="${escapeHtml(m)}" ${draft.muscleGroupsSnapshot.includes(m) ? "checked" : ""} />
-            <span class="muscle-card-body">${escapeHtml(m)}</span>
-          </label>
-        `
-          )
-          .join("")}
+      <section class="workout-steps" aria-labelledby="workout-steps-title">
+        <span id="workout-steps-title" class="workout-steps-label">How it works</span>
+        <ol>
+          <li><span>1</span><strong>Select muscles</strong></li>
+          <li><span>2</span><strong>Assign muscle &amp; set up lift</strong></li>
+          <li><span>3</span><strong>Log reps &amp; weight</strong></li>
+          <li><span>4</span><strong>Review &amp; submit</strong></li>
+        </ol>
+      </section>
+      <h2>Choose Muscle to Train</h2>
+      <div class="workout-date-picker">
+        <div>
+          <strong>Workout date</strong>
+          <span>${ALLOW_ANY_WORKOUT_DATE ? "Choose any date to log a missed workout." : "Choose Today or Yesterday only."}</span>
+        </div>
+        <div class="workout-date-options" role="group" aria-label="Workout date">
+          <button class="workout-date-option ${draft.date === today ? "active" : ""}" type="button" data-workout-date-option="${today}" aria-pressed="${draft.date === today}">
+            <strong>Today</strong>
+            <span>${formatDate(today)}</span>
+          </button>
+          <button class="workout-date-option ${draft.date === yesterday ? "active" : ""}" type="button" data-workout-date-option="${yesterday}" aria-pressed="${draft.date === yesterday}">
+            <strong>Yesterday</strong>
+            <span>${formatDate(yesterday)}</span>
+          </button>
+        </div>
+        ${ALLOW_ANY_WORKOUT_DATE
+          ? `<label>Choose date<input type="date" name="workoutDate" value="${escapeHtml(draft.date)}" required /></label>`
+          : `<input type="hidden" name="workoutDate" value="${escapeHtml(draft.date)}" />`}
       </div>
+      ${renderWorkoutMuscleGroup("Primary", "Main muscle focus", primaryMuscles, draft)}
+      ${renderWorkoutMuscleGroup("Secondary", "Supporting muscle focus", secondaryMuscles, draft)}
       <button type="submit">Save Muscle Groups</button>
     </form>
     ${
       draft.muscleGroupsSnapshot.length
         ? `
-      <form id="lift-config-form" class="panel">
-        <h2>Lift Setup</h2>
-        <label>Name of lifts<input type="text" name="liftName" value="${escapeHtml(builder.liftName)}" required /></label>
-        <label>How many set<input type="number" name="setsCount" min="1" max="12" value="${builder.setsCount}" required /></label>
-        <label>Weight unit
-          <select name="unit">
-            <option value="kg" ${builder.unit === "kg" ? "selected" : ""}>kg</option>
-            <option value="lbs" ${builder.unit === "lbs" ? "selected" : ""}>lbs</option>
-          </select>
-        </label>
-        <button type="submit">Start Set Input</button>
-      </form>
-      ${
-        builder.liftName
-          ? `
-        <form id="set-form" class="panel">
-          <h2>Set ${builder.currentSet} of ${builder.setsCount}</h2>
-          <label>rep<input type="number" name="reps" min="0" required /></label>
-          <label>weight (${builder.unit})<input type="number" name="weight" min="0" step="0.1" required /></label>
-          <button type="submit">${builder.currentSet === builder.setsCount ? "Submit" : "Next"}</button>
-        </form>
-      `
-          : ""
-      }
-      <div class="panel">
-        <h2>Current Session Lifts</h2>
-        ${draft.lifts.length ? renderDraftLifts(draft.lifts) : "<p>No lift added yet.</p>"}
-        <button id="submit-session" ${draft.lifts.length ? "" : "disabled"}>Submit Workout Session</button>
-      </div>
-    `
+          <form id="lift-config-form" class="panel">
+            <h2>Lift Setup</h2>
+            <p class="hint">Assign every lift to one selected muscle so Analytics can count its sets and reps correctly.</p>
+            <label>Name of lifts<input type="text" name="liftName" value="${escapeHtml(builder.liftName)}" required /></label>
+            <fieldset class="lift-muscle-picker">
+              <legend>Muscle trained</legend>
+              <div class="lift-muscle-options">
+                ${draft.muscleGroupsSnapshot
+                  .map(
+                    (muscle, index) => `
+                      <label class="lift-muscle-option" for="lift_muscle_${index}">
+                        <input id="lift_muscle_${index}" type="radio" name="liftMuscle" value="${escapeHtml(muscle)}" ${builderMuscleIsValid && builder.muscleGroup === muscle ? "checked" : ""} required />
+                        <span>${escapeHtml(muscle)}</span>
+                      </label>
+                    `
+                  )
+                  .join("")}
+              </div>
+            </fieldset>
+            <label>How many sets
+              <select id="sets-count-select" name="setsCount" required>
+                ${Array.from({ length: 10 }, (_, index) => index + 1)
+                  .map((count) => `<option value="${count}" ${!usesCustomSetCount && builder.setsCount === count ? "selected" : ""}>${count}</option>`)
+                  .join("")}
+                <option value="custom" ${usesCustomSetCount ? "selected" : ""}>More than 10...</option>
+              </select>
+            </label>
+            <label id="custom-sets-field" class="manual-input-field ${usesCustomSetCount ? "is-enabled" : "is-disabled"}">Enter number of sets (11+)
+              <input type="number" name="customSetsCount" min="11" step="1" value="${usesCustomSetCount ? builder.setsCount : 11}" ${usesCustomSetCount ? "required" : "disabled"} />
+            </label>
+            <label>Weight unit
+              <select name="unit">
+                <option value="kg" ${builder.unit === "kg" ? "selected" : ""}>kg</option>
+                <option value="lbs" ${builder.unit === "lbs" ? "selected" : ""}>lbs</option>
+              </select>
+            </label>
+            <button type="submit">${builder.editingLiftId ? "Restart Set Input" : "Start Set Input"}</button>
+          </form>
+          ${
+            builder.isConfigured && builderMuscleIsValid
+              ? `
+                <form id="set-form" class="panel">
+                  <h2>Set ${builder.currentSet} of ${builder.setsCount}</h2>
+                  <label>Reps
+                    <select id="reps-count-select" name="reps" required>
+                      ${Array.from({ length: 20 }, (_, index) => index + 1)
+                        .map((count) => `<option value="${count}" ${builder.pendingRepsChoice === String(count) ? "selected" : ""}>${count}</option>`)
+                        .join("")}
+                      <option value="custom" ${usesCustomReps ? "selected" : ""}>More than 20...</option>
+                    </select>
+                  </label>
+                  <label id="custom-reps-field" class="manual-input-field ${usesCustomReps ? "is-enabled" : "is-disabled"}">Enter number of reps (21+)
+                    <input type="number" name="customReps" min="21" step="1" value="${builder.pendingCustomReps}" ${usesCustomReps ? "required" : "disabled"} />
+                  </label>
+                  <label>Weight (${builder.unit})<input type="number" name="weight" min="0" step="0.1" value="${escapeHtml(builder.pendingWeight)}" required /></label>
+                  <button type="submit">${builder.currentSet === builder.setsCount ? "Submit" : "Next"}</button>
+                </form>
+              `
+              : ""
+          }
+          <div class="panel">
+            <h2>Current Session Lifts</h2>
+            ${draft.lifts.length ? renderDraftLifts(draft.lifts) : "<p>No lift added yet.</p>"}
+            ${hasUnassignedLifts ? `<p class="assignment-warning">Edit each unassigned lift and choose its trained muscle before submitting.</p>` : ""}
+            <button id="submit-session" class="submit-workout-button" type="button" ${draft.lifts.length && !hasUnassignedLifts ? "" : "disabled"}>${state.busy ? "Saving..." : "Submit Workout Session"}</button>
+          </div>
+        `
         : ""
     }
-    <div class="panel">
-      <h2>Submitted Workouts</h2>
-      ${renderSubmittedSessions()}
-    </div>
-    ${renderEditSessionPanel()}
+  `;
+}
+
+function updateWorkoutDateSelection(form, nextDate) {
+  const dateInput = form.elements.workoutDate;
+  if (dateInput) dateInput.value = nextDate;
+  form.querySelectorAll("[data-workout-date-option]").forEach((option) => {
+    const isActive = option.dataset.workoutDateOption === nextDate;
+    option.classList.toggle("active", isActive);
+    option.setAttribute("aria-pressed", String(isActive));
+  });
+}
+
+function renderWorkoutResumeCard() {
+  const builder = normalizeLiftBuilder(state.liftBuilder);
+  const progress = builder.isConfigured
+    ? `Set ${builder.currentSet} of ${builder.setsCount} - ${builder.liftName}`
+    : `${state.workoutDraft.lifts.length} completed lift${state.workoutDraft.lifts.length === 1 ? "" : "s"}`;
+  return `
+    <section class="panel workout-resume-card">
+      <div>
+        <span class="resume-eyebrow">Workout in progress</span>
+        <h2>Continue ${formatDate(state.workoutDraft.date)}</h2>
+        <p>${escapeHtml(progress)}</p>
+      </div>
+      <div class="inline-actions">
+        <button id="resume-workout" type="button">Resume Workout</button>
+        <button class="danger" type="button" data-discard-workout>Discard</button>
+      </div>
+    </section>
+  `;
+}
+
+function renderWorkoutMuscleGroup(title, description, muscles, draft) {
+  return `
+    <section class="workout-muscle-section" aria-labelledby="${title.toLowerCase()}-muscle-title">
+      <div class="workout-muscle-heading">
+        <h3 id="${title.toLowerCase()}-muscle-title">${title}</h3>
+        <span>${description}</span>
+      </div>
+      <div class="muscle-card-grid">
+        ${muscles.length
+          ? muscles
+              .map(
+                (muscle, index) => `
+                  <label class="muscle-card" for="muscle_${muscle.category}_${index}">
+                    <input id="muscle_${muscle.category}_${index}" type="checkbox" name="muscles" value="${escapeHtml(muscle.name)}" ${draft.muscleGroupsSnapshot.includes(muscle.name) ? "checked" : ""} />
+                    <span class="muscle-card-body">${escapeHtml(muscle.name)}</span>
+                  </label>
+                `
+              )
+              .join("")
+          : `<p class="hint">No ${title.toLowerCase()} muscle groups available.</p>`}
+      </div>
+    </section>
   `;
 }
 
@@ -559,82 +1545,255 @@ function renderDraftLifts(lifts) {
   return lifts
     .map(
       (lift) => `
-      <div class="list-item">
-        <strong>${escapeHtml(lift.name)} (${lift.unit})</strong>
-        <span>${lift.sets.length} sets</span>
-        <span>${lift.sets.map((s) => `S${s.setNumber}: ${s.reps} reps @ ${s.weight}`).join(" | ")}</span>
-      </div>
-    `
+        <div class="list-item">
+          <strong>${escapeHtml(lift.name)} (${lift.unit})</strong>
+          <span class="lift-muscle-assignment ${lift.muscleGroup ? "" : "unassigned"}">Muscle: ${lift.muscleGroup ? escapeHtml(lift.muscleGroup) : "Not assigned"}</span>
+          <span>${lift.sets.length} sets</span>
+          <span>${lift.sets.map((set) => `S${set.setNumber}: ${set.reps} reps @ ${set.weight}`).join(" | ")}</span>
+          ${state.liftBuilder?.editingLiftId === lift.id ? `<span class="draft-lift-editing">Editing from Set 1</span>` : ""}
+          <div class="inline-actions draft-lift-actions">
+            <button type="button" class="ghost" data-edit-draft-lift="${escapeHtml(lift.id)}">Edit</button>
+            <button type="button" class="danger" data-delete-draft-lift="${escapeHtml(lift.id)}">Delete</button>
+          </div>
+        </div>
+      `
     )
     .join("");
 }
 
-function renderFocus(sessions) {
-  const today = parseIso(todayIso());
-  const start = weekStartMonday(today);
-  const weekRows = [];
-  for (let i = 0; i < 7; i += 1) {
-    const d = new Date(start);
-    d.setDate(start.getDate() + i);
-    const iso = `${d.getFullYear()}-${`${d.getMonth() + 1}`.padStart(2, "0")}-${`${d.getDate()}`.padStart(2, "0")}`;
-    const daySessions = sessions.filter((s) => s.date === iso);
-    const muscles = [...new Set(daySessions.flatMap((s) => s.muscleGroupsSnapshot))];
-    weekRows.push({ iso, muscles });
-  }
-  const monthly = {};
-  sessions.forEach((s) => {
-    const d = parseIso(s.date);
-    if (d.getMonth() === today.getMonth() && d.getFullYear() === today.getFullYear()) {
-      if (!monthly[s.date]) monthly[s.date] = new Set();
-      s.muscleGroupsSnapshot.forEach((m) => monthly[s.date].add(m));
-    }
-  });
+function renderStreak() {
   return `
-    <div class="panel">
-      <h2>Weekly Calendar (Monday Start)</h2>
-      ${weekRows
-        .map(
-          (r) => `
-        <div class="list-item">
-          <strong>${formatDate(r.iso)}</strong>
-          <span class="${r.muscles.length ? "focus-trained" : ""}">${r.muscles.length ? r.muscles.join(", ") : "Rest day"}</span>
-        </div>
-      `
-        )
-        .join("")}
-    </div>
-    <div class="panel">
-      <h2>Monthly Calendar Entries</h2>
-      ${
-        Object.keys(monthly).length
-          ? Object.entries(monthly)
-              .sort((a, b) => (a[0] < b[0] ? 1 : -1))
-              .map(
-                ([date, muscles]) => `
-              <div class="list-item">
-                <strong>${formatDate(date)}</strong>
-                <span class="focus-trained">${[...muscles].join(", ")}</span>
-              </div>
-            `
-              )
-              .join("")
-          : "<p>No entries this month.</p>"
-      }
+    <div class="panel track-panel">
+      <div>
+        <h2>Analytics</h2>
+        <p>See how many gym days each muscle has been trained, then select a bar to view sets, reps, and the latest workout.</p>
+      </div>
+      <div class="track-filter-row" aria-label="Analytics time filter">
+        ${trackRangeButton("allTime", "All time")}
+        ${trackRangeButton("thisMonth", "This month")}
+        ${trackRangeButton("last30", "Last 30 days")}
+      </div>
+      ${renderMuscleBarChart(state.trackRange, "primary", "Primary Muscle Chart")}
+      ${renderMuscleBarChart(state.trackRange, "secondary", "Secondary Muscle Chart")}
     </div>
   `;
 }
 
-function renderStreak(analytics) {
+function trackRangeButton(range, label) {
+  return `<button class="track-filter ${state.trackRange === range ? "active" : ""}" data-track-range="${range}">${label}</button>`;
+}
+
+function renderMuscleBarChart(range, category, title) {
+  const rows = getMuscleDayCounts(range, category);
+  if (!rows.length) {
+    return `
+      <section class="analytics-chart-section ${category}">
+        <h3>${title}</h3>
+        <p>No ${category} muscle groups available.</p>
+      </section>
+    `;
+  }
+
+  const maxCount = Math.max(...rows.map((row) => row.count));
   return `
-    <div class="metrics">
-      ${metric("Current Streak", `${analytics.currentStreak} gym days`)}
-      ${metric("Longest Streak", `${analytics.longestStreak} gym days`)}
-      ${metric("Gym Days This Week", analytics.weekGymDays)}
-      ${metric("Gym Days This Month", analytics.monthGymDays)}
+    <section class="analytics-chart-section ${category}">
+      <div class="analytics-chart-heading">
+        <h3>${title}</h3>
+        <span>${rows.reduce((sum, row) => sum + row.count, 0)} total muscle days</span>
+      </div>
+      <div class="track-chart" aria-label="${title} showing gym days trained for each muscle">
+        ${rows
+          .map((row) => {
+            const height = maxCount > 0 && row.count > 0 ? Math.max((row.count / maxCount) * 100, 8) : 0;
+            return `
+              <button
+                class="chart-column chart-column-button"
+                type="button"
+                data-muscle-detail="${escapeHtml(row.name)}"
+                data-muscle-category="${category}"
+                aria-label="View ${escapeHtml(row.name)} analytics details"
+              >
+                <span class="chart-value">${row.count} day${row.count === 1 ? "" : "s"}</span>
+                <span class="chart-bar-area" aria-hidden="true">
+                  <span class="chart-bar" style="height:${height}%"></span>
+                </span>
+                <strong class="chart-label">${escapeHtml(row.name)}</strong>
+              </button>
+            `;
+          })
+          .join("")}
+      </div>
+    </section>
+  `;
+}
+
+function getMuscleDayCounts(range, category) {
+  const today = parseIso(todayIso());
+  const month = today.getMonth();
+  const year = today.getFullYear();
+  const last30Start = new Date(today);
+  last30Start.setDate(today.getDate() - 29);
+  const muscleDays = new Map();
+
+  state.sessions.forEach((session) => {
+    const date = parseIso(session.date);
+    const include =
+      range === "allTime" ||
+      (range === "thisMonth" && date.getMonth() === month && date.getFullYear() === year) ||
+      (range === "last30" && date >= last30Start && date <= today);
+
+    if (!include) return;
+
+    getSessionTrainedMuscles(session).forEach((name) => {
+      if (!muscleDays.has(name)) muscleDays.set(name, new Set());
+      muscleDays.get(name).add(session.date);
+    });
+  });
+
+  return getMusclesByCategory(category)
+    .map((muscle) => ({ name: muscle.name, count: muscleDays.get(muscle.name)?.size || 0 }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+}
+
+function getSessionsForMuscle(muscleName) {
+  const normalizedMuscle = normalizeMuscleName(muscleName);
+  return state.sessions
+    .filter((session) =>
+      getSessionTrainedMuscles(session).some((name) => normalizeMuscleName(name) === normalizedMuscle)
+    )
+    .sort((a, b) => {
+      const dateOrder = String(b.date).localeCompare(String(a.date));
+      if (dateOrder !== 0) return dateOrder;
+      return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime();
+    });
+}
+
+function getTrainingTotals(sessions, muscleName = "") {
+  return sessions.reduce(
+    (totals, session) => {
+      const lifts = muscleName ? getSessionLiftsForMuscle(session, muscleName) : session.lifts || [];
+      lifts.forEach((lift) => {
+        const sets = lift.sets || [];
+        totals.sets += sets.length;
+        totals.reps += sets.reduce((sum, set) => sum + (Number(set.reps) || 0), 0);
+      });
+      return totals;
+    },
+    { sets: 0, reps: 0 }
+  );
+}
+
+function renderMuscleAnalyticsDetail() {
+  const selection = state.selectedAnalyticsMuscle;
+  if (!selection?.name) {
+    return `
+      <div class="panel muscle-analytics-page">
+        <button id="back-analytics" class="back-button" type="button"><span aria-hidden="true">&larr;</span>Back to Analytics</button>
+        <p>Select a muscle bar from Analytics to view its details.</p>
+      </div>
+    `;
+  }
+
+  const allSessions = getSessionsForMuscle(selection.name);
+  const today = parseIso(todayIso());
+  const last30Start = new Date(today);
+  last30Start.setDate(today.getDate() - 29);
+  const last30Sessions = allSessions.filter((session) => {
+    const date = parseIso(session.date);
+    return date >= last30Start && date <= today;
+  });
+  const last30Totals = getTrainingTotals(last30Sessions, selection.name);
+  const allTimeTotals = getTrainingTotals(allSessions, selection.name);
+  const latestSession = allSessions[0] || null;
+  const categoryLabel = selection.category === "secondary" ? "Secondary muscle" : "Primary muscle";
+
+  return `
+    <div class="muscle-analytics-page">
+      <section class="panel muscle-detail-hero">
+        <div class="page-top-row">
+          <button id="back-analytics" class="back-button" type="button"><span aria-hidden="true">&larr;</span>Back to Analytics</button>
+          <span class="muscle-category-badge">${categoryLabel}</span>
+        </div>
+        <div>
+          <h2>${escapeHtml(selection.name)} Training Detail</h2>
+          <p>Total sets and reps from lifts assigned to ${escapeHtml(selection.name)}.</p>
+          <p class="analytics-data-note">Legacy sessions with multiple muscles and no per-lift assignment remain visible as training days, but are excluded from set and rep totals.</p>
+        </div>
+        <div class="muscle-total-range-grid">
+          ${renderMuscleTotalRange("Last 30 Days", last30Totals)}
+          ${renderMuscleTotalRange("All Time", allTimeTotals)}
+        </div>
+      </section>
+      <section class="panel latest-muscle-workout">
+        <div class="analytics-chart-heading">
+          <div>
+            <h3>Latest ${escapeHtml(selection.name)} Workout</h3>
+            <p>Only the most recent workout tagged with this muscle is shown.</p>
+          </div>
+          ${latestSession ? `<strong class="latest-muscle-date">${formatDate(latestSession.date)}</strong>` : ""}
+        </div>
+        ${latestSession ? renderLatestMuscleSession(latestSession, selection.name) : `<p>No workout has been recorded for this muscle yet.</p>`}
+      </section>
     </div>
-    <div class="panel"><h2>Weekly Muscle Summary</h2>${renderSummary(analytics.weekMuscles)}</div>
-    <div class="panel"><h2>Monthly Muscle Summary</h2>${renderSummary(analytics.monthMuscles)}</div>
-    <div class="panel"><h2>Streak Rule</h2><p>Rest days are allowed. Streak ends if you go 7 consecutive days with no workout submitted.</p></div>
+  `;
+}
+
+function renderMuscleTotalRange(label, totals) {
+  return `
+    <article class="muscle-total-range-card">
+      <span>${label}</span>
+      <div>
+        <strong>${totals.sets}</strong>
+        <small>Total sets</small>
+      </div>
+      <div>
+        <strong>${totals.reps}</strong>
+        <small>Total reps</small>
+      </div>
+    </article>
+  `;
+}
+
+function renderLatestMuscleSession(session, muscleName) {
+  const lifts = getSessionLiftsForMuscle(session, muscleName);
+  const totals = getTrainingTotals([session], muscleName);
+  return `
+    <div class="latest-muscle-summary">
+      <span>${lifts.length} lift${lifts.length === 1 ? "" : "s"}</span>
+      <span>${totals.sets} set${totals.sets === 1 ? "" : "s"}</span>
+      <span>${totals.reps} rep${totals.reps === 1 ? "" : "s"}</span>
+    </div>
+    <p class="latest-session-muscles">Session muscles: ${getSessionTrainedMuscles(session).map(escapeHtml).join(", ")}</p>
+    ${
+      lifts.length
+        ? lifts
+            .map((lift, liftIndex) => {
+              const sets = lift.sets || [];
+              return `
+                <article class="muscle-lift-detail">
+                  <div class="session-detail-heading">
+                    <strong>Lift ${liftIndex + 1}: ${escapeHtml(lift.name)}</strong>
+                    <span>${sets.length} set${sets.length === 1 ? "" : "s"} · ${escapeHtml(lift.unit)}</span>
+                  </div>
+                  <div class="set-detail-grid">
+                    ${sets
+                      .map(
+                        (set, setIndex) => `
+                          <div>
+                            <strong>Set ${set.setNumber || setIndex + 1}</strong>
+                            <span>${Number(set.reps) || 0} reps</span>
+                            <span>${Number(set.weight) || 0} ${escapeHtml(lift.unit)}</span>
+                          </div>
+                        `
+                      )
+                      .join("")}
+                  </div>
+                </article>
+              `;
+            })
+            .join("")
+        : `<p>No lift in this legacy workout can be attributed specifically to ${escapeHtml(muscleName)}.</p>`
+    }
   `;
 }
 
@@ -644,84 +1803,55 @@ function renderSummary(mapObj) {
   return rows
     .map(
       ([name, count]) => `
-      <div class="list-item">
-        <strong>${escapeHtml(name)}</strong>
-        <span>${count} time${count > 1 ? "s" : ""}</span>
-      </div>
-    `
+        <div class="list-item">
+          <strong>${escapeHtml(name)}</strong>
+          <span>${count} time${count > 1 ? "s" : ""}</span>
+        </div>
+      `
     )
     .join("");
 }
 
 function renderMuscles() {
-  const muscles = getUserMuscles(state.user.id);
+  const primary = getMusclesByCategory("primary");
+  const secondary = getMusclesByCategory("secondary");
+
   return `
     <div class="muscle-management-grid">
       <div class="panel">
         <h2>Primary Muscle</h2>
-        ${muscles.primary
+        ${primary
           .map(
-            (m, i) => `
-          <div class="list-item">
-            <strong>${escapeHtml(m)}</strong>
-            <div class="inline-actions">
-              <button class="danger" data-remove-default="primary:${i}">Remove</button>
-            </div>
-          </div>
-        `
-          )
-          .join("")}
-        ${
-          muscles.customPrimary.length
-            ? muscles.customPrimary
-                .map(
-                  (m, i) => `
+            (row) => `
               <div class="list-item">
-                <strong>${escapeHtml(m)}</strong>
+                <strong>${escapeHtml(row.name)}</strong>
                 <div class="inline-actions">
-                  <button class="danger" data-remove-custom="primary:${i}">Remove</button>
+                  <button class="danger" data-remove-muscle="${row.id}">Remove</button>
                 </div>
               </div>
             `
-                )
-                .join("")
-            : ""
-        }
+          )
+          .join("")}
       </div>
       <div class="panel">
         <h2>Secondary Muscle</h2>
-        ${muscles.secondary
+        ${secondary
           .map(
-            (m, i) => `
-          <div class="list-item">
-            <strong>${escapeHtml(m)}</strong>
-            <div class="inline-actions">
-              <button class="danger" data-remove-default="secondary:${i}">Remove</button>
-            </div>
-          </div>
-        `
-          )
-          .join("")}
-        ${
-          muscles.customSecondary.length
-            ? muscles.customSecondary
-                .map(
-                  (m, i) => `
+            (row) => `
               <div class="list-item">
-                <strong>${escapeHtml(m)}</strong>
+                <strong>${escapeHtml(row.name)}</strong>
                 <div class="inline-actions">
-                  <button class="danger" data-remove-custom="secondary:${i}">Remove</button>
+                  <button class="danger" data-remove-muscle="${row.id}">Remove</button>
                 </div>
               </div>
             `
-                )
-                .join("")
-            : ""
-        }
+          )
+          .join("")}
       </div>
     </div>
     <form id="muscle-add-form" class="panel">
       <h2>Add Muscle Group</h2>
+      <p class="muscle-add-description">Add muscle groups here so they appear as selectable options whenever you log a workout session.</p>
       <label>Muscle name<input type="text" name="muscleName" required /></label>
       <label>Category
         <select name="muscleCategory" required>
@@ -729,230 +1859,630 @@ function renderMuscles() {
           <option value="secondary">Secondary</option>
         </select>
       </label>
-      <button type="submit">Add Muscle Group</button>
+      <button type="submit">${state.busy ? "Saving..." : "Add Muscle Group"}</button>
     </form>
   `;
 }
 
-function renderSubmittedSessions() {
-  const sessions = getUserSessions(state.user.id);
-  if (!sessions.length) return "<p>No submitted workouts yet.</p>";
-  return sessions
-    .slice(0, 12)
-    .map(
-      (s) => `
-      <div class="list-item">
-        <strong>${formatDate(s.date)}</strong>
-        <span>${s.muscleGroupsSnapshot.join(", ")}</span>
-        <span>${s.lifts.length} lifts</span>
-        <button data-edit-session="${s.id}">Edit Workout</button>
+function renderSettings() {
+  return `
+    <div class="panel">
+      <h2>Settings</h2>
+      <div class="account-email">
+        <strong>Email</strong>
+        <span>${escapeHtml(state.authUser.email)}</span>
       </div>
-    `
+      <form id="profile-form">
+        <label>Name<input type="text" name="name" value="${escapeHtml(state.profile?.name || "")}" required /></label>
+        <button type="submit">${state.busy ? "Saving..." : "Save Name"}</button>
+      </form>
+      <div class="sound-preference">
+        <div>
+          <strong id="button-sounds-label">Button sounds</strong>
+          <p id="button-sounds-description">A soft tap for buttons and muscle selections. Saved on this device.</p>
+        </div>
+        <button id="button-sounds-toggle" class="sound-toggle" type="button" role="switch" aria-checked="${state.buttonSoundsEnabled}" aria-labelledby="button-sounds-label" aria-describedby="button-sounds-description" data-click-sound="off">
+          <span class="sound-toggle-track" aria-hidden="true"></span>
+          <span class="sound-toggle-status" aria-hidden="true">${state.buttonSoundsEnabled ? "On" : "Off"}</span>
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+function getSubmittedWorkoutMonths() {
+  return [...new Set(state.sessions.map((session) => String(session.date).slice(0, 7)).filter(Boolean))].sort().reverse();
+}
+
+function formatWorkoutMonth(monthKey) {
+  const [year, month] = monthKey.split("-").map(Number);
+  return new Date(year, month - 1, 1).toLocaleDateString(undefined, { month: "long", year: "numeric" });
+}
+
+function isWorkoutWithinLast20Days(session) {
+  const ageInDays = Math.floor((parseIso(todayIso()) - parseIso(session.date)) / 86400000);
+  return ageInDays >= 0 && ageInDays < 20;
+}
+
+function renderSubmittedWorkoutsPage() {
+  const months = getSubmittedWorkoutMonths();
+  const validFilters = new Set(["last20", "all", ...months]);
+  const selectedFilter = validFilters.has(state.submittedWorkoutFilter) ? state.submittedWorkoutFilter : "last20";
+  const sessions = state.sessions.filter((session) => {
+    if (selectedFilter === "last20") return isWorkoutWithinLast20Days(session);
+    if (selectedFilter === "all") return true;
+    return String(session.date).startsWith(selectedFilter);
+  });
+
+  return `
+    <div class="submitted-workouts-page">
+      <div class="workout-nav">
+        <button id="back-workout" class="back-button" type="button" aria-label="Back to Add Workout">
+          <span aria-hidden="true">&larr;</span>
+          Back to Add Workout
+        </button>
+      </div>
+      <section class="panel">
+        <div class="submitted-workouts-heading">
+          <div>
+            <h2>Submitted Workouts</h2>
+            <p>Review or delete workouts from the last 20 days, or choose a specific month.</p>
+          </div>
+          <label>Show workouts
+            <select id="submitted-history-filter">
+              <option value="last20" ${selectedFilter === "last20" ? "selected" : ""}>Last 20 days</option>
+              <option value="all" ${selectedFilter === "all" ? "selected" : ""}>All months</option>
+              ${months
+                .map(
+                  (month) =>
+                    `<option value="${month}" ${selectedFilter === month ? "selected" : ""}>${formatWorkoutMonth(month)}</option>`
+                )
+                .join("")}
+            </select>
+          </label>
+        </div>
+        <div class="submitted-workout-list">
+          ${renderSubmittedSessions(sessions)}
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function renderSubmittedSessions(sessions) {
+  if (!sessions.length) return "<p>No submitted workouts found for this filter.</p>";
+  return sessions
+    .map(
+      (session) => `
+        <article class="list-item submitted-workout-item">
+          <strong>${formatDate(session.date)}</strong>
+          <span>${getSessionTrainedMuscles(session).map(escapeHtml).join(", ") || "No muscle assigned"}</span>
+          <span>${session.lifts.length} lift${session.lifts.length === 1 ? "" : "s"}</span>
+          <div class="submitted-workout-actions">
+            <button class="danger" data-delete-session="${session.id}">Delete Workout</button>
+          </div>
+        </article>
+      `
     )
     .join("");
 }
 
-function renderEditSessionPanel() {
-  if (!state.editingSessionId) return "";
-  const session = state.store.sessions.find((s) => s.id === state.editingSessionId && s.userId === state.user.id);
-  if (!session) return "";
-  const muscles = getAllMuscles(state.user.id);
-  return `
-    <form id="edit-session-form" class="panel">
-      <h2>Edit Submitted Workout</h2>
-      <p><strong>Date:</strong> ${formatDate(session.date)}</p>
-      <p>Muscle Groups</p>
-      <div class="muscle-card-grid">
-        ${muscles
-          .map(
-            (m, i) => `
-          <label class="muscle-card" for="edit_muscle_${i}">
-            <input id="edit_muscle_${i}" type="checkbox" name="muscles" value="${escapeHtml(m)}" ${session.muscleGroupsSnapshot.includes(m) ? "checked" : ""} />
-            <span class="muscle-card-body">${escapeHtml(m)}</span>
-          </label>
-        `
-          )
-          .join("")}
-      </div>
-      <div class="inline-actions">
-        <button type="submit">Save Edit</button>
-        <button type="button" id="cancel-edit-session" class="ghost">Cancel</button>
-      </div>
-    </form>
-  `;
-}
-
 function bindEvents() {
+  bindCalendarEvents();
+
+  const soundToggle = document.getElementById("button-sounds-toggle");
+  if (soundToggle) {
+    soundToggle.addEventListener("click", () => {
+      saveButtonSoundsPreference(!state.buttonSoundsEnabled);
+      soundToggle.setAttribute("aria-checked", String(state.buttonSoundsEnabled));
+      soundToggle.querySelector(".sound-toggle-status").textContent = state.buttonSoundsEnabled ? "On" : "Off";
+      if (state.buttonSoundsEnabled) void playButtonSound();
+    });
+  }
+
+  document.querySelectorAll(".theme-dot[data-theme]").forEach((button) => {
+    button.addEventListener("click", () => {
+      saveTheme(button.dataset.theme);
+      render();
+    });
+  });
+
   const registerForm = document.getElementById("register-form");
   if (registerForm) {
-    registerForm.addEventListener("submit", (e) => {
-      e.preventDefault();
-      const email = e.target.email.value.trim().toLowerCase();
-      const name = e.target.name ? e.target.name.value.trim() : "";
-      const password = e.target.password.value;
-      if (state.store.users.some((u) => u.email === email)) return alert("Email already registered.");
-      const user = { id: uid("user"), name, email, password };
-      state.store.users.push(user);
-      state.store.musclesByUser[user.id] = {
-        primary: [...DEFAULT_PRIMARY],
-        secondary: [...DEFAULT_SECONDARY],
-        customPrimary: [],
-        customSecondary: [],
-      };
-      saveStore();
-      e.target.reset();
-      alert("Registration success. Please login.");
+    registerForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const name = event.target.elements.name.value.trim();
+      const email = event.target.elements.email.value.trim().toLowerCase();
+      const password = event.target.elements.password.value;
+
+      await runBusy(async () => {
+        const { data, error } = await state.supabase.auth.signUp({
+          email,
+          password,
+          options: {
+            data: { name },
+          },
+        });
+
+        if (error) throw error;
+        if (!data.session) {
+          alert("Check your email to confirm your account, then log in.");
+          return;
+        }
+        await ensureProfile();
+        await loadProfile();
+      });
     });
   }
 
   const loginForm = document.getElementById("login-form");
   if (loginForm) {
-    loginForm.addEventListener("submit", (e) => {
-      e.preventDefault();
-      const email = e.target.email.value.trim().toLowerCase();
-      const password = e.target.password.value;
-      const user = state.store.users.find((u) => u.email === email && u.password === password);
-      if (!user) return alert("Invalid email or password.");
-      state.user = user;
-      state.currentView = "dashboard";
-      state.workoutDraft = null;
-      state.liftBuilder = null;
-      state.editingSessionId = null;
-      render();
+    loginForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const email = event.target.elements.email.value.trim().toLowerCase();
+      const password = event.target.elements.password.value;
+
+      await runBusy(async () => {
+        const { error } = await state.supabase.auth.signInWithPassword({ email, password });
+        if (error) throw error;
+      });
     });
   }
 
-  const logout = document.getElementById("logout-btn");
-  if (logout) {
-    logout.addEventListener("click", () => {
-      state.user = null;
-      state.currentView = "dashboard";
-      state.workoutDraft = null;
-      state.liftBuilder = null;
-      state.editingSessionId = null;
-      render();
+  const logoutButton = document.getElementById("logout-btn");
+  if (logoutButton) {
+    logoutButton.addEventListener("click", async () => {
+      await runBusy(async () => {
+        state.selectedCalendarDate = null;
+        if (state.workoutDraft) {
+          saveWorkoutDraftLocally();
+          await syncWorkoutDraftToServer();
+        }
+        const { error } = await state.supabase.auth.signOut();
+        if (error) throw error;
+      });
     });
   }
 
-  document.querySelectorAll("[data-tab]").forEach((t) => {
-    t.addEventListener("click", () => {
-      state.currentView = t.dataset.tab;
+  document.querySelectorAll("[data-tab]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.currentView = button.dataset.tab;
+      if (state.workoutDraft) queueWorkoutDraftSave();
       render();
     });
   });
+
+  document.querySelectorAll("[data-track-range]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.trackRange = button.dataset.trackRange;
+      render();
+    });
+  });
+
+  document.querySelectorAll("[data-muscle-detail]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.selectedAnalyticsMuscle = {
+        name: button.dataset.muscleDetail,
+        category: button.dataset.muscleCategory,
+      };
+      state.currentView = "muscleAnalyticsDetail";
+      if (state.workoutDraft) queueWorkoutDraftSave();
+      render();
+    });
+  });
+
+  const backAnalytics = document.getElementById("back-analytics");
+  if (backAnalytics) {
+    backAnalytics.addEventListener("click", () => {
+      state.currentView = "streak";
+      render();
+    });
+  }
+
+  const goSubmittedWorkouts = document.getElementById("go-submitted-workouts");
+  if (goSubmittedWorkouts) {
+    goSubmittedWorkouts.addEventListener("click", () => {
+      state.currentView = "submittedWorkouts";
+      queueWorkoutDraftSave();
+      render();
+    });
+  }
+
+  const backWorkout = document.getElementById("back-workout");
+  if (backWorkout) {
+    backWorkout.addEventListener("click", () => {
+      state.currentView = "workout";
+      ensureWorkoutState();
+      queueWorkoutDraftSave();
+      render();
+    });
+  }
+
+  const submittedHistoryFilter = document.getElementById("submitted-history-filter");
+  if (submittedHistoryFilter) {
+    submittedHistoryFilter.addEventListener("change", (event) => {
+      state.submittedWorkoutFilter = event.target.value;
+      render();
+    });
+  }
 
   const goWorkout = document.getElementById("go-workout");
   if (goWorkout) {
     goWorkout.addEventListener("click", () => {
       state.currentView = "workout";
+      ensureWorkoutState();
+      queueWorkoutDraftSave();
       render();
     });
   }
+
+  const resumeWorkout = document.getElementById("resume-workout");
+  if (resumeWorkout) {
+    resumeWorkout.addEventListener("click", () => {
+      state.currentView = "workout";
+      queueWorkoutDraftSave();
+      render();
+    });
+  }
+
+  document.querySelectorAll("[data-discard-workout]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!confirm("Discard this unfinished workout? This cannot be undone.")) return;
+      await discardWorkoutDraft();
+    });
+  });
+
+  const goSettings = document.getElementById("go-settings");
+  if (goSettings) {
+    goSettings.addEventListener("click", () => {
+      state.currentView = "settings";
+      if (state.workoutDraft) queueWorkoutDraftSave();
+      render();
+    });
+  }
+
   const backDashboard = document.getElementById("back-dashboard");
   if (backDashboard) {
     backDashboard.addEventListener("click", () => {
       state.currentView = "dashboard";
+      if (state.workoutDraft) queueWorkoutDraftSave();
       render();
     });
   }
 
   const muscleSelectForm = document.getElementById("muscle-select-form");
   if (muscleSelectForm) {
-    muscleSelectForm.addEventListener("submit", (e) => {
-      e.preventDefault();
-      const selected = [...e.target.querySelectorAll('input[name="muscles"]:checked')].map((o) => o.value);
-      if (!selected.length) return alert("Select at least one muscle group.");
+    muscleSelectForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const workoutDate = event.target.elements.workoutDate?.value || state.workoutDraft.date;
+      if (!isAllowedWorkoutDate(workoutDate)) {
+        alert(ALLOW_ANY_WORKOUT_DATE ? "Choose a valid workout date." : "Choose Today or Yesterday as the workout date.");
+        return;
+      }
+      const selected = [...event.target.querySelectorAll('input[name="muscles"]:checked')].map((input) => input.value);
+      if (!selected.length) {
+        alert("Select at least one muscle group.");
+        return;
+      }
+      state.workoutDraft.date = workoutDate;
       state.workoutDraft.muscleGroupsSnapshot = selected;
+      queueWorkoutDraftSave();
       render();
+    });
+
+    muscleSelectForm.querySelectorAll('input[name="muscles"]').forEach((input) => {
+      input.addEventListener("change", () => {
+        state.workoutDraft.muscleGroupsSnapshot = [
+          ...muscleSelectForm.querySelectorAll('input[name="muscles"]:checked'),
+        ].map((item) => item.value);
+        queueWorkoutDraftSave();
+      });
+    });
+
+    const selectWorkoutDate = (nextDate) => {
+        const previousDate = state.workoutDraft.date;
+        if (!isAllowedWorkoutDate(nextDate)) {
+          updateWorkoutDateSelection(muscleSelectForm, previousDate);
+          return;
+        }
+        if (
+          nextDate !== previousDate &&
+          (state.workoutDraft.lifts.length || state.liftBuilder?.isConfigured) &&
+          !confirm(`Move this unfinished workout from ${formatDate(previousDate)} to ${formatDate(nextDate)}?`)
+        ) {
+          updateWorkoutDateSelection(muscleSelectForm, previousDate);
+          return;
+        }
+        state.workoutDraft.date = nextDate;
+        updateWorkoutDateSelection(muscleSelectForm, nextDate);
+        queueWorkoutDraftSave();
+    };
+    muscleSelectForm.elements.workoutDate?.addEventListener("change", (event) => {
+      selectWorkoutDate(event.target.value);
+    });
+    document.querySelectorAll("[data-workout-date-option]").forEach((button) => {
+      button.addEventListener("click", () => selectWorkoutDate(button.dataset.workoutDateOption));
     });
   }
 
   const liftConfigForm = document.getElementById("lift-config-form");
   if (liftConfigForm) {
-    liftConfigForm.addEventListener("submit", (e) => {
-      e.preventDefault();
-      const liftName = e.target.liftName.value.trim();
-      const setsCount = Number(e.target.setsCount.value);
-      const unit = e.target.unit.value;
-      if (!liftName || setsCount < 1) return;
-      state.liftBuilder = { liftName, setsCount, unit, currentSet: 1, sets: [] };
+    liftConfigForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const liftName = event.target.elements.liftName.value.trim();
+      const usesCustomSetCount = event.target.elements.setsCount.value === "custom";
+      const setsCount = Number(
+        usesCustomSetCount ? event.target.elements.customSetsCount.value : event.target.elements.setsCount.value
+      );
+      const unit = event.target.elements.unit.value;
+      const muscleGroup = event.target.elements.liftMuscle.value;
+      if (!state.workoutDraft.muscleGroupsSnapshot.includes(muscleGroup)) {
+        alert("Choose which selected muscle this lift trains.");
+        return;
+      }
+      if (!liftName || !Number.isInteger(setsCount) || setsCount < 1 || (usesCustomSetCount && setsCount <= 10)) {
+        alert("Choose 1-10 sets, or enter a whole number greater than 10.");
+        return;
+      }
+      state.liftBuilder = createLiftBuilder({
+        liftName,
+        muscleGroup,
+        setsCount,
+        unit,
+        currentSet: 1,
+        sets: [],
+        editingLiftId: state.liftBuilder.editingLiftId || null,
+        isConfigured: true,
+      });
+      queueWorkoutDraftSave();
       render();
     });
+
+    liftConfigForm.elements.liftName.addEventListener("input", (event) => {
+      state.liftBuilder.liftName = event.target.value;
+      queueWorkoutDraftSave();
+    });
+
+    liftConfigForm.querySelectorAll('input[name="liftMuscle"]').forEach((input) => {
+      input.addEventListener("change", (event) => {
+        state.liftBuilder.muscleGroup = event.target.value;
+        queueWorkoutDraftSave();
+      });
+    });
+
+    liftConfigForm.elements.unit.addEventListener("change", (event) => {
+      state.liftBuilder.unit = event.target.value;
+      queueWorkoutDraftSave();
+    });
+  }
+
+  const setsCountSelect = document.getElementById("sets-count-select");
+  if (setsCountSelect) {
+    setsCountSelect.addEventListener("change", () => {
+      const customSetsField = document.getElementById("custom-sets-field");
+      const customSetsInput = customSetsField?.querySelector("input");
+      const isCustom = setsCountSelect.value === "custom";
+      if (!customSetsField || !customSetsInput) return;
+      customSetsField.classList.toggle("is-enabled", isCustom);
+      customSetsField.classList.toggle("is-disabled", !isCustom);
+      customSetsInput.required = isCustom;
+      customSetsInput.disabled = !isCustom;
+      state.liftBuilder.setsCount = isCustom
+        ? Math.max(11, Number.parseInt(customSetsInput.value, 10) || 11)
+        : Number.parseInt(setsCountSelect.value, 10);
+      queueWorkoutDraftSave();
+      if (isCustom) customSetsInput.focus();
+    });
+
+    const customSetsInput = document.querySelector('input[name="customSetsCount"]');
+    if (customSetsInput) {
+      customSetsInput.addEventListener("input", () => {
+        state.liftBuilder.setsCount = Math.max(11, Number.parseInt(customSetsInput.value, 10) || 11);
+        queueWorkoutDraftSave();
+      });
+    }
+  }
+
+  const repsCountSelect = document.getElementById("reps-count-select");
+  if (repsCountSelect) {
+    repsCountSelect.addEventListener("change", () => {
+      const customRepsField = document.getElementById("custom-reps-field");
+      const customRepsInput = customRepsField?.querySelector("input");
+      const isCustom = repsCountSelect.value === "custom";
+      if (!customRepsField || !customRepsInput) return;
+      customRepsField.classList.toggle("is-enabled", isCustom);
+      customRepsField.classList.toggle("is-disabled", !isCustom);
+      customRepsInput.required = isCustom;
+      customRepsInput.disabled = !isCustom;
+      state.liftBuilder.pendingRepsChoice = repsCountSelect.value;
+      queueWorkoutDraftSave();
+      if (isCustom) customRepsInput.focus();
+    });
+
+
+    const customRepsInput = document.querySelector('input[name="customReps"]');
+    if (customRepsInput) {
+      customRepsInput.addEventListener("input", () => {
+        state.liftBuilder.pendingCustomReps = Math.max(21, Number.parseInt(customRepsInput.value, 10) || 21);
+        queueWorkoutDraftSave();
+      });
+    }
   }
 
   const setForm = document.getElementById("set-form");
   if (setForm) {
-    setForm.addEventListener("submit", (e) => {
-      e.preventDefault();
-      const reps = Number(e.target.reps.value);
-      const weight = Number(e.target.weight.value);
-      if (!Number.isFinite(reps) || !Number.isFinite(weight) || reps < 0 || weight < 0) {
-        return alert("Please enter valid reps and weight.");
+    setForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const usesCustomReps = event.target.elements.reps.value === "custom";
+      const reps = Number(usesCustomReps ? event.target.elements.customReps.value : event.target.elements.reps.value);
+      const weight = Number(event.target.elements.weight.value);
+      if (!state.workoutDraft.muscleGroupsSnapshot.includes(state.liftBuilder.muscleGroup)) {
+        alert("Return to Lift Setup and choose the muscle trained by this lift.");
+        return;
       }
-      const b = state.liftBuilder;
-      b.sets.push({ setNumber: b.currentSet, reps, weight });
-      if (b.currentSet === b.setsCount) {
-        state.workoutDraft.lifts.push({ id: uid("lift"), name: b.liftName, unit: b.unit, sets: b.sets });
-        state.liftBuilder = { liftName: "", setsCount: 1, unit: "kg", currentSet: 1, sets: [] };
+      if (
+        !Number.isInteger(reps) ||
+        reps < 1 ||
+        (usesCustomReps && reps <= 20) ||
+        !Number.isFinite(weight) ||
+        weight < 0
+      ) {
+        alert("Choose 1-20 reps, or enter a whole number greater than 20. Weight must be zero or higher.");
+        return;
+      }
+
+      state.liftBuilder.sets.push({
+        setNumber: state.liftBuilder.currentSet,
+        reps,
+        weight,
+      });
+
+      if (state.liftBuilder.currentSet === state.liftBuilder.setsCount) {
+        const completedLift = {
+          id: state.liftBuilder.editingLiftId || crypto.randomUUID(),
+          name: state.liftBuilder.liftName,
+          muscleGroup: state.liftBuilder.muscleGroup,
+          unit: state.liftBuilder.unit,
+          sets: state.liftBuilder.sets,
+        };
+        const editingIndex = state.workoutDraft.lifts.findIndex((lift) => lift.id === state.liftBuilder.editingLiftId);
+        if (editingIndex >= 0) {
+          state.workoutDraft.lifts.splice(editingIndex, 1, completedLift);
+        } else {
+          state.workoutDraft.lifts.push(completedLift);
+        }
+        state.liftBuilder = createLiftBuilder();
       } else {
-        b.currentSet += 1;
+        state.liftBuilder.currentSet += 1;
+        state.liftBuilder.pendingRepsChoice = "1";
+        state.liftBuilder.pendingCustomReps = 21;
+        state.liftBuilder.pendingWeight = "";
       }
+
+      queueWorkoutDraftSave();
       render();
+    });
+
+    setForm.elements.weight.addEventListener("input", (event) => {
+      state.liftBuilder.pendingWeight = event.target.value;
+      queueWorkoutDraftSave();
     });
   }
 
+  document.querySelectorAll("[data-edit-draft-lift]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const lift = state.workoutDraft?.lifts.find((item) => item.id === button.dataset.editDraftLift);
+      if (!lift) return;
+      state.liftBuilder = createLiftBuilder({
+        liftName: lift.name,
+        muscleGroup: lift.muscleGroup || "",
+        setsCount: Math.max(1, lift.sets?.length || 1),
+        unit: lift.unit,
+        currentSet: 1,
+        sets: [],
+        editingLiftId: lift.id,
+        isConfigured: true,
+      });
+      queueWorkoutDraftSave();
+      render();
+    });
+  });
+
+  document.querySelectorAll("[data-delete-draft-lift]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const liftId = button.dataset.deleteDraftLift;
+      const lift = state.workoutDraft?.lifts.find((item) => item.id === liftId);
+      if (!lift || !confirm(`Delete ${lift.name} from this workout session?`)) return;
+      state.workoutDraft.lifts = state.workoutDraft.lifts.filter((item) => item.id !== liftId);
+      if (state.liftBuilder?.editingLiftId === liftId) {
+        state.liftBuilder = createLiftBuilder();
+      }
+      queueWorkoutDraftSave();
+      render();
+    });
+  });
+
   const submitSession = document.getElementById("submit-session");
   if (submitSession) {
-    submitSession.addEventListener("click", () => {
-      if (!state.workoutDraft.lifts.length) return;
-      state.store.sessions.push({
-        id: uid("session"),
-        userId: state.user.id,
-        date: state.workoutDraft.date,
-        muscleGroupsSnapshot: state.workoutDraft.muscleGroupsSnapshot,
-        lifts: state.workoutDraft.lifts,
-        createdAt: new Date().toISOString(),
+    submitSession.addEventListener("click", async () => {
+      if (!state.workoutDraft?.lifts.length) return;
+      const invalidLift = state.workoutDraft.lifts.find(
+        (lift) => !lift.muscleGroup || !state.workoutDraft.muscleGroupsSnapshot.includes(lift.muscleGroup)
+      );
+      if (invalidLift) {
+        alert(`Edit ${invalidLift.name} and choose which selected muscle it trains before submitting.`);
+        return;
+      }
+      await runBusy(async () => {
+        const draftSynced = await syncWorkoutDraftToServer({ throwOnError: true });
+        let finalizedFromDraft = false;
+
+        if (draftSynced) {
+          const { error: finalizeError } = await state.supabase.rpc("finalize_workout_draft");
+          if (!finalizeError) {
+            finalizedFromDraft = true;
+          } else if (!isDraftBackendUnavailable(finalizeError)) {
+            throw finalizeError;
+          }
+        }
+
+        if (!finalizedFromDraft) {
+          const { error } = await state.supabase.from("workout_sessions").insert({
+            user_id: state.authUser.id,
+            workout_date: state.workoutDraft.date,
+            muscle_groups: state.workoutDraft.muscleGroupsSnapshot,
+            lifts: state.workoutDraft.lifts,
+          });
+          if (error) throw error;
+        }
+
+        await loadSessions();
+        await clearWorkoutDraftPersistence({ deleteServer: !finalizedFromDraft });
+        state.workoutDraft = null;
+        state.liftBuilder = null;
+        state.currentView = "dashboard";
+        alert("Workout session submitted.");
       });
-      saveStore();
-      state.workoutDraft = null;
-      state.liftBuilder = null;
-      state.editingSessionId = null;
-      state.currentView = "dashboard";
-      alert("Workout session submitted.");
-      render();
     });
   }
 
   const profileForm = document.getElementById("profile-form");
   if (profileForm) {
-    profileForm.addEventListener("submit", (e) => {
-      e.preventDefault();
-      const name = e.target.name.value.trim();
-      const userIndex = state.store.users.findIndex((u) => u.id === state.user.id);
-      if (userIndex === -1) return;
-      state.store.users[userIndex].name = name;
-      state.user = state.store.users[userIndex];
-      saveStore();
-      alert("Profile name updated.");
-      render();
+    profileForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const name = event.target.elements.name.value.trim();
+
+      await runBusy(async () => {
+        const { error } = await state.supabase
+          .from("profiles")
+          .update({ name, updated_at: new Date().toISOString() })
+          .eq("id", state.authUser.id);
+
+        if (error) throw error;
+        await loadProfile();
+        alert("Profile name updated.");
+      });
     });
   }
 
   const copyShareSummary = document.getElementById("copy-share-summary");
   if (copyShareSummary) {
     copyShareSummary.addEventListener("click", async () => {
-      const analytics = computeAnalytics(state.user.id);
-      const top = topPair(analytics.weekMuscles);
-      const payload = getSharePayload(analytics, top);
+      const analytics = computeAnalytics();
+      const payload = getSharePayload(analytics, topPair(analytics.last30Muscles));
       const summary = [
-        `${payload.name} - Weekly Gym Update`,
+        "The Gym Grind",
+        `${payload.name} - Personal Gym Update`,
         `Current Streak: ${payload.currentStreak} days`,
+        `Longest Streak: ${payload.longestStreak} days`,
         `Weekly Streak: ${payload.weeklyStreak} weeks`,
-        `Gym Days This Week: ${payload.weekGymDays}`,
+        `Longest Weekly Streak: ${payload.longestWeeklyStreak} weeks`,
+        `Gym Days Last 30 Days: ${payload.last30GymDays}`,
         `Top Muscle: ${payload.topMuscle}`,
         `Level: ${payload.level}`,
         `XP: ${payload.xp} (${payload.xpIntoLevel}/100 to next level)`,
       ].join("\n");
+
       try {
         await navigator.clipboard.writeText(summary);
         alert("Summary copied.");
@@ -965,137 +2495,226 @@ function bindEvents() {
   const downloadShareCard = document.getElementById("download-share-card");
   if (downloadShareCard) {
     downloadShareCard.addEventListener("click", () => {
-      const analytics = computeAnalytics(state.user.id);
-      const top = topPair(analytics.weekMuscles);
-      const payload = getSharePayload(analytics, top);
-      downloadShareImage(payload);
+      const analytics = computeAnalytics();
+      downloadShareImage(getSharePayload(analytics, topPair(analytics.last30Muscles)));
     });
   }
 
   const muscleAddForm = document.getElementById("muscle-add-form");
   if (muscleAddForm) {
-    muscleAddForm.addEventListener("submit", (e) => {
-      e.preventDefault();
-      const name = e.target.muscleName.value.trim();
-      const category = e.target.muscleCategory.value;
+    muscleAddForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const name = event.target.elements.muscleName.value.trim();
+      const category = event.target.elements.muscleCategory.value;
       if (!name) return;
-      const muscles = getUserMuscles(state.user.id);
-      const all = [...muscles.primary, ...muscles.secondary, ...muscles.customPrimary, ...muscles.customSecondary];
-      if (all.some((m) => m.toLowerCase() === name.toLowerCase())) return alert("Muscle group already exists.");
-      if (category === "primary") muscles.customPrimary.push(name);
-      if (category === "secondary") muscles.customSecondary.push(name);
-      setUserMuscles(state.user.id, muscles);
-      e.target.reset();
-      render();
-    });
-  }
-  document.querySelectorAll("[data-remove-custom]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const payload = btn.dataset.removeCustom || "";
-      const [type, idxText] = payload.split(":");
-      const idx = Number(idxText);
-      const muscles = getUserMuscles(state.user.id);
-      if (type === "primary") muscles.customPrimary.splice(idx, 1);
-      if (type === "secondary") muscles.customSecondary.splice(idx, 1);
-      setUserMuscles(state.user.id, muscles);
-      render();
-    });
-  });
 
-  document.querySelectorAll("[data-remove-default]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const payload = btn.dataset.removeDefault || "";
-      const [type, idxText] = payload.split(":");
-      const idx = Number(idxText);
-      const muscles = getUserMuscles(state.user.id);
-      if (type === "primary") muscles.primary.splice(idx, 1);
-      if (type === "secondary") muscles.secondary.splice(idx, 1);
-      setUserMuscles(state.user.id, muscles);
-      render();
-    });
-  });
+      const exists = state.muscles.some((row) => row.name.toLowerCase() === name.toLowerCase());
+      if (exists) {
+        alert("Muscle group already exists.");
+        return;
+      }
 
-  document.querySelectorAll(".theme-dot[data-theme]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const next = btn.dataset.theme;
-      if (!next) return;
-      state.theme = next;
-      localStorage.setItem(THEME_KEY, next);
-      render();
-    });
-  });
+      await runBusy(async () => {
+        const { error } = await state.supabase.from("muscle_groups").insert({
+          user_id: state.authUser.id,
+          name,
+          category,
+        });
 
-  document.querySelectorAll("[data-edit-session]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      state.editingSessionId = btn.dataset.editSession;
-      render();
-    });
-  });
-
-  const cancelEditSession = document.getElementById("cancel-edit-session");
-  if (cancelEditSession) {
-    cancelEditSession.addEventListener("click", () => {
-      state.editingSessionId = null;
-      render();
+        if (error) throw error;
+        await loadMuscles();
+      });
     });
   }
 
-  const editSessionForm = document.getElementById("edit-session-form");
-  if (editSessionForm) {
-    editSessionForm.addEventListener("submit", (e) => {
-      e.preventDefault();
-      const selected = [...e.target.querySelectorAll('input[name="muscles"]:checked')].map((i) => i.value);
-      if (!selected.length) return alert("Select at least one muscle group.");
-      const idx = state.store.sessions.findIndex((s) => s.id === state.editingSessionId && s.userId === state.user.id);
-      if (idx === -1) return;
-      state.store.sessions[idx].muscleGroupsSnapshot = selected;
-      saveStore();
-      state.editingSessionId = null;
-      alert("Muscle groups updated.");
-      render();
+  document.querySelectorAll("[data-remove-muscle]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const muscleId = button.dataset.removeMuscle;
+      await runBusy(async () => {
+        const { error } = await state.supabase.from("muscle_groups").delete().eq("id", muscleId);
+        if (error) throw error;
+        await loadMuscles();
+      });
     });
+  });
+
+  document.querySelectorAll("[data-delete-session]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const session = state.sessions.find((item) => String(item.id) === String(button.dataset.deleteSession));
+      if (!session) return;
+      const confirmed = confirm("Delete this workout? XP and streak stats will update automatically.");
+      if (!confirmed) return;
+      await runBusy(async () => {
+        const { error } = await state.supabase
+          .from("workout_sessions")
+          .delete()
+          .eq("id", button.dataset.deleteSession)
+          .eq("user_id", state.authUser.id);
+
+        if (error) throw error;
+        await loadSessions();
+        alert("Workout deleted.");
+      });
+    });
+  });
+}
+
+async function runBusy(task) {
+  try {
+    state.busy = true;
+    render();
+    await task();
+  } catch (error) {
+    alert(error.message || "Something went wrong.");
+  } finally {
+    state.busy = false;
+    render();
   }
 }
 
 function downloadShareImage(payload) {
+  const theme = getCanvasTheme();
   const canvas = document.createElement("canvas");
   canvas.width = 1200;
   canvas.height = 628;
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
 
-  ctx.fillStyle = "#1a1d20";
+  const cardGradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+  cardGradient.addColorStop(0, theme.gradientStart);
+  cardGradient.addColorStop(0.52, theme.panel);
+  cardGradient.addColorStop(1, theme.gradientEnd);
+
+  ctx.save();
+  roundRect(ctx, 3, 3, canvas.width - 6, canvas.height - 6, 24);
+  ctx.clip();
+  ctx.fillStyle = cardGradient;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = "#f3a530";
-  ctx.fillRect(0, 0, canvas.width, 16);
+  ctx.restore();
 
-  ctx.fillStyle = "#f2f3f5";
+  ctx.strokeStyle = theme.accent;
+  ctx.lineWidth = 6;
+  roundRect(ctx, 3, 3, canvas.width - 6, canvas.height - 6, 24);
+  ctx.stroke();
+
+  ctx.fillStyle = theme.ink;
   ctx.font = "700 48px Arial";
-  ctx.fillText("Weekly Gym Update", 60, 90);
+  ctx.fillText("The Gym Grind", 118, 134);
   ctx.font = "600 34px Arial";
-  ctx.fillText(payload.name, 60, 140);
+  ctx.fillStyle = theme.muted;
+  ctx.fillText(`${payload.name} - Personal Gym Update`, 118, 182, 964);
 
-  const rows = [
-    `Current Streak: ${payload.currentStreak} days`,
-    `Weekly Streak: ${payload.weeklyStreak} weeks`,
-    `Gym Days This Week: ${payload.weekGymDays}`,
-    `Top Muscle: ${payload.topMuscle}`,
-    `Level: ${payload.level}`,
-    `XP: ${payload.xp} (${payload.xpIntoLevel}/100 to next level)`,
+  ctx.fillStyle = theme.ink;
+  ctx.font = "700 36px Arial";
+  ctx.textAlign = "left";
+  ctx.fillText(`Level ${payload.level}`, 118, 248);
+  ctx.fillStyle = theme.muted;
+  ctx.font = "600 21px Arial";
+  ctx.textAlign = "right";
+  ctx.fillText(`XP ${payload.xp} total (${payload.xpIntoLevel}/100)`, 1082, 248);
+  ctx.textAlign = "left";
+
+  ctx.fillStyle = theme.card;
+  roundRect(ctx, 118, 266, 964, 8, 4);
+  ctx.fill();
+  if (payload.xpIntoLevel > 0) {
+    ctx.fillStyle = theme.accent;
+    roundRect(ctx, 118, 266, 964 * (payload.xpIntoLevel / 100), 8, 4);
+    ctx.fill();
+  }
+
+  const statPanels = [
+    [
+      ["Current Streak", `${payload.currentStreak}`],
+      ["Weekly Streak", `${payload.weeklyStreak}`],
+      ["Gym Days (Last 30D)", `${payload.last30GymDays}`],
+    ],
+    [
+      ["Longest Streak", `${payload.longestStreak}`],
+      ["Longest Weekly Streak", `${payload.longestWeeklyStreak}`],
+      ["Top Muscle", payload.topMuscle],
+    ],
   ];
 
-  ctx.font = "500 32px Arial";
-  ctx.fillStyle = "#e8edf1";
-  rows.forEach((row, i) => {
-    ctx.fillText(row, 60, 220 + i * 62);
+  statPanels.forEach((stats, panelIndex) => {
+    const x = panelIndex === 0 ? 118 : 610;
+    const panelWidth = panelIndex === 0 ? 470 : 472;
+    ctx.fillStyle = theme.card;
+    roundRect(ctx, x, 304, panelWidth, 190, 18);
+    ctx.fill();
+
+    stats.forEach(([label, value], rowIndex) => {
+      const y = 346 + rowIndex * 58;
+      ctx.fillStyle = theme.ink;
+      ctx.font = "600 24px Arial";
+      ctx.textAlign = "left";
+      ctx.fillText(label, x + 26, y, panelWidth - 150);
+      ctx.font = "700 25px Arial";
+      ctx.textAlign = "right";
+      ctx.fillText(value, x + panelWidth - 26, y, 190);
+    });
   });
 
-  ctx.fillStyle = "#a8afb7";
-  ctx.font = "500 24px Arial";
-  ctx.fillText("Generated from Gym Tracker", 60, 588);
+  ctx.textAlign = "left";
+  ctx.fillStyle = theme.muted;
+  ctx.font = "500 19px Arial";
+  ctx.fillText("Generated by GymBoard", 118, 532);
 
   const link = document.createElement("a");
   link.href = canvas.toDataURL("image/png");
-  link.download = "gym-weekly-share-card.png";
+  link.download = "gymboard-personal-gym-card.png";
   link.click();
+}
+
+function getCanvasTheme() {
+  const themes = {
+    dark: {
+      bg: "#111315",
+      panel: "#1a1d20",
+      gradientStart: "#332817",
+      gradientEnd: "#22272c",
+      card: "#252a2f",
+      ink: "#f2f3f5",
+      muted: "#a8afb7",
+      accent: "#f3a530",
+      accent2: "#f2b650",
+    },
+    pastel: {
+      bg: "#ffeef4",
+      panel: "#fff7fb",
+      gradientStart: "#f8d8e5",
+      gradientEnd: "#fbe5ee",
+      card: "#fbe5ee",
+      ink: "#5a2c42",
+      muted: "#8e5f78",
+      accent: "#ec7da8",
+      accent2: "#f09dbf",
+    },
+    royal: {
+      bg: "#1f1730",
+      panel: "#2d203b",
+      gradientStart: "#47255c",
+      gradientEnd: "#352345",
+      card: "#3c2b4d",
+      ink: "#f3e8d6",
+      muted: "#cdbda6",
+      accent: "#a35ce0",
+      accent2: "#b98255",
+    },
+  };
+  return themes[state.theme] || themes.dark;
+}
+
+function roundRect(ctx, x, y, width, height, radius) {
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.lineTo(x + width - radius, y);
+  ctx.quadraticCurveTo(x + width, y, x + width, y + radius);
+  ctx.lineTo(x + width, y + height - radius);
+  ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
+  ctx.lineTo(x + radius, y + height);
+  ctx.quadraticCurveTo(x, y + height, x, y + height - radius);
+  ctx.lineTo(x, y + radius);
+  ctx.quadraticCurveTo(x, y, x + radius, y);
+  ctx.closePath();
 }

@@ -14,6 +14,8 @@ body[data-theme="dark"] {
   --card-bg: #20252a;
   --card-selected-bg: #2f2b1d;
   --active-ink: #171a1d;
+  --fire: #f3a530;
+  --fire-core: #ffd47a;
 }
 
 body[data-theme="pastel"] {
@@ -32,6 +34,8 @@ body[data-theme="pastel"] {
   --card-bg: #fbe5ee;
   --card-selected-bg: #f4c7db;
   --active-ink: #fff9fb;
+  --fire: #ec7da8;
+  --fire-core: #fff0f6;
 }
 
 body[data-theme="royal"] {
@@ -50,6 +54,8 @@ body[data-theme="royal"] {
   --card-bg: #322340;
   --card-selected-bg: #4f3152;
   --active-ink: #f3e8d6;
+  --fire: #a35ce0;
+  --fire-core: #b98255;
 }
 
 * {
@@ -103,6 +109,33 @@ p {
   background: var(--panel);
 }
 
+.auth-brand {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.auth-brand h1 {
+  margin-bottom: 0;
+  font-size: clamp(2rem, 5vw, 3rem);
+}
+
+.brand-tagline {
+  color: var(--ink);
+  font-family: "Space Grotesk", sans-serif;
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.brand-description {
+  max-width: 38rem;
+  font-size: 0.92rem;
+}
+
+.header-user-name {
+  margin-top: 0.2rem;
+  font-size: 0.84rem;
+}
+
 .auth-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -136,12 +169,18 @@ button {
   font-weight: 700;
   font-family: "Manrope", sans-serif;
   cursor: pointer;
-  transition: transform 0.15s ease, background-color 0.15s ease;
+  transition: transform 0.16s cubic-bezier(0.2, 0.8, 0.2, 1), background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease, filter 0.16s ease;
 }
 
 .tab:hover,
 button:hover {
   transform: translateY(-1px);
+}
+
+button:active:not(:disabled) {
+  transform: translateY(0) scale(0.97);
+  filter: brightness(1.06);
+  transition-duration: 0.06s;
 }
 
 .tab.active {
@@ -155,8 +194,9 @@ button:hover {
 }
 
 .danger {
-  border-color: var(--danger);
-  color: var(--danger);
+  border-color: color-mix(in srgb, var(--ink) 34%, transparent);
+  color: color-mix(in srgb, var(--ink) 82%, transparent);
+  background: color-mix(in srgb, var(--ink) 9%, transparent);
 }
 
 .content {
@@ -164,10 +204,35 @@ button:hover {
   gap: 1rem;
 }
 
+.content > :not(.panel) {
+  animation: screen-flow-in 280ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
 .dashboard-row {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 1rem;
+}
+
+.dashboard-cta-row {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  justify-content: flex-end;
+}
+
+.grind-welcome {
+  margin-right: auto;
+  color: var(--ink);
+  font-family: "Space Grotesk", sans-serif;
+  font-size: 1.45rem;
+  font-weight: 700;
+  background: linear-gradient(90deg, var(--ink), var(--accent), var(--ink));
+  background-size: 220% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: grind-shine 3.6s ease-in-out infinite;
 }
 
 .muscle-management-grid {
@@ -183,7 +248,7 @@ button:hover {
   background: var(--panel);
   display: grid;
   gap: 0.8rem;
-  animation: reveal 220ms ease;
+  animation: reveal 280ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 .metrics {
@@ -199,6 +264,7 @@ button:hover {
   background: linear-gradient(160deg, #1f2328 35%, #2a2f36 100%);
   display: grid;
   gap: 0.4rem;
+  position: relative;
 }
 
 .metric p {
@@ -209,6 +275,105 @@ button:hover {
 
 body[data-theme="pastel"] .metric h3 {
   color: #fffdfd;
+}
+
+.streak-metric {
+  padding-right: 2.75rem;
+}
+
+.fire-icon {
+  position: absolute;
+  top: 0.6rem;
+  right: 0.7rem;
+  width: 1.75rem;
+  height: 1.75rem;
+  color: var(--fire);
+  line-height: 1;
+  transform-origin: center bottom;
+  transition: color 0.2s ease, filter 0.2s ease, opacity 0.2s ease;
+}
+
+.fire-icon svg {
+  position: relative;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  height: 100%;
+  fill: currentColor;
+}
+
+.fire-core {
+  fill: var(--fire-core);
+}
+
+.fire-lit {
+  opacity: 1;
+  filter:
+    drop-shadow(0 0 5px color-mix(in srgb, var(--fire-core) 92%, transparent))
+    drop-shadow(0 0 12px color-mix(in srgb, var(--fire) 82%, transparent));
+  animation: fire-flicker 1.15s ease-in-out infinite;
+}
+
+.fire-lit::before {
+  content: "";
+  position: absolute;
+  inset: -0.45rem;
+  border-radius: 50%;
+  background: radial-gradient(circle, color-mix(in srgb, var(--fire) 42%, transparent), transparent 68%);
+  filter: blur(3px);
+  animation: fire-glow 1.6s ease-in-out infinite;
+}
+
+.fire-lit .fire-core {
+  transform-box: fill-box;
+  transform-origin: center bottom;
+  animation: fire-core-pulse 0.82s ease-in-out infinite;
+}
+
+.fire-dim {
+  color: color-mix(in srgb, var(--muted) 55%, transparent);
+  opacity: 0.45;
+  filter: none;
+}
+
+@keyframes fire-flicker {
+  0%,
+  100% {
+    transform: rotate(-1deg) scale(1);
+  }
+  28% {
+    transform: rotate(1.5deg) scale(1.08, 1.13);
+  }
+  52% {
+    transform: rotate(-1.5deg) scale(0.98, 1.05);
+  }
+  76% {
+    transform: rotate(1deg) scale(1.05, 1.09);
+  }
+}
+
+@keyframes fire-glow {
+  0%,
+  100% {
+    opacity: 0.48;
+    transform: scale(0.9);
+  }
+  50% {
+    opacity: 0.9;
+    transform: scale(1.18);
+  }
+}
+
+@keyframes fire-core-pulse {
+  0%,
+  100% {
+    transform: scale(0.92, 0.9);
+    opacity: 0.82;
+  }
+  50% {
+    transform: scale(1.08, 1.14);
+    opacity: 1;
+  }
 }
 
 label {
@@ -230,6 +395,24 @@ textarea {
   background: var(--input-bg);
 }
 
+input:disabled,
+select:disabled,
+textarea:disabled {
+  border-color: color-mix(in srgb, var(--line) 74%, var(--muted) 26%);
+  background: color-mix(in srgb, var(--input-bg) 76%, var(--muted) 24%);
+  color: color-mix(in srgb, var(--input-ink) 48%, var(--muted) 52%);
+  cursor: not-allowed;
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+button:disabled:hover {
+  transform: none;
+}
+
 select[multiple] {
   min-height: 130px;
 }
@@ -248,36 +431,556 @@ select[multiple] {
 
 .inline-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.4rem;
+}
+
+.submitted-workouts-page,
+.submitted-workout-list {
+  display: grid;
+  gap: 1rem;
+}
+
+.submitted-workouts-heading {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 240px);
+  align-items: end;
+  gap: 1rem;
+}
+
+.submitted-workout-item {
+  gap: 0.35rem;
+  padding: 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 88%, var(--card-bg) 12%);
+}
+
+.submitted-workout-item:first-of-type {
+  padding-top: 0.85rem;
+}
+
+.submitted-workout-actions {
+  display: flex;
+  margin-top: 0.35rem;
+}
+
+.submitted-workout-actions button {
+  width: auto;
 }
 
 .hint {
   font-size: 0.88rem;
 }
 
+.account-email {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.75rem;
+  display: grid;
+  gap: 0.2rem;
+  background: color-mix(in srgb, var(--panel) 86%, var(--accent) 14%);
+}
+
+.account-email span {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.track-panel {
+  gap: 1rem;
+}
+
+.track-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.track-filter.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--active-ink);
+}
+
+.analytics-chart-section {
+  display: grid;
+  gap: 0.9rem;
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 88%, var(--accent) 12%);
+}
+
+.analytics-chart-section.secondary {
+  background: color-mix(in srgb, var(--panel) 92%, var(--accent-2) 8%);
+}
+
+.analytics-chart-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.analytics-chart-heading span,
+.workout-muscle-heading span {
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.track-chart {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  gap: 0.8rem;
+  min-height: 270px;
+  padding: 0.75rem 0.25rem 0;
+  overflow-x: auto;
+}
+
+.track-chart::before {
+  content: "";
+  position: absolute;
+  top: 2.2rem;
+  right: 0.25rem;
+  bottom: 3.8rem;
+  left: 0.25rem;
+  border-bottom: 1px solid var(--line);
+  background: repeating-linear-gradient(
+    to top,
+    color-mix(in srgb, var(--line) 72%, transparent) 0,
+    color-mix(in srgb, var(--line) 72%, transparent) 1px,
+    transparent 1px,
+    transparent 25%
+  );
+  pointer-events: none;
+}
+
+.chart-column {
+  position: relative;
+  z-index: 1;
+  flex: 1 0 76px;
+  display: grid;
+  grid-template-rows: auto 190px auto;
+  justify-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.chart-column-button {
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 0.25rem;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.chart-column-button:hover,
+.chart-column-button:focus-visible {
+  border-color: color-mix(in srgb, var(--accent) 52%, var(--line) 48%);
+  background: color-mix(in srgb, var(--panel) 84%, var(--accent) 16%);
+  transform: translateY(-2px);
+}
+
+.chart-column-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.chart-value {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.chart-label {
+  width: 100%;
+  min-height: 2.5rem;
+  font-size: 0.88rem;
+  line-height: 1.25;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.chart-bar-area {
+  display: flex;
+  align-items: flex-end;
+  width: min(54px, 72%);
+  height: 190px;
+  overflow: hidden;
+}
+
+.chart-bar {
+  width: 100%;
+  border-radius: 6px 6px 2px 2px;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 72%, white 28%), var(--accent));
+  box-shadow: 0 0 14px color-mix(in srgb, var(--accent) 26%, transparent);
+  transition: height 0.25s ease;
+}
+
+.analytics-chart-section.secondary .chart-bar {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent-2) 72%, white 28%), var(--accent-2));
+  box-shadow: 0 0 14px color-mix(in srgb, var(--accent-2) 24%, transparent);
+}
+
+.muscle-analytics-page {
+  display: grid;
+  gap: 1rem;
+}
+
+.muscle-detail-hero {
+  gap: 1.1rem;
+}
+
+.muscle-category-badge {
+  padding: 0.35rem 0.65rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 58%, var(--line) 42%);
+  border-radius: 999px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--panel) 88%, var(--accent) 12%);
+  font-size: 0.76rem;
+  font-weight: 800;
+}
+
+.muscle-total-range-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem;
+}
+
+.muscle-total-range-card {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: linear-gradient(145deg, color-mix(in srgb, var(--panel) 82%, var(--accent) 18%), var(--card-bg));
+}
+
+.muscle-total-range-card > span {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.muscle-total-range-card > div {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.muscle-total-range-card strong {
+  color: var(--ink);
+  font-family: "Space Grotesk", sans-serif;
+  font-size: clamp(1.6rem, 4vw, 2.2rem);
+}
+
+.muscle-total-range-card small {
+  color: var(--muted);
+}
+
+.latest-muscle-workout {
+  gap: 1rem;
+}
+
+.latest-muscle-date {
+  color: var(--accent);
+  font-size: 0.9rem;
+  text-align: right;
+}
+
+.latest-muscle-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.latest-muscle-summary span {
+  padding: 0.4rem 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--ink);
+  background: color-mix(in srgb, var(--panel) 84%, var(--accent) 16%);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.latest-session-muscles {
+  font-size: 0.88rem;
+}
+
+.muscle-lift-detail {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0.9rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--panel) 90%, var(--card-bg) 10%);
+}
+
+.monthly-calendar {
+  display: grid;
+  gap: 0.85rem;
+  min-width: 0;
+}
+
+.monthly-calendar > * {
+  animation: calendar-flow-in 220ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.monthly-calendar > :nth-child(2) {
+  animation-delay: 25ms;
+}
+
+.monthly-calendar > :nth-child(3) {
+  animation-delay: 50ms;
+}
+
+.calendar-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.calendar-period-fields {
+  display: grid;
+  grid-template-columns: minmax(130px, 1.5fr) minmax(90px, 1fr);
+  flex: 1 1 240px;
+  max-width: 360px;
+  gap: 0.6rem;
+}
+
+.calendar-period-fields label {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.calendar-period-fields select {
+  min-height: 44px;
+  font-size: 0.9rem;
+}
+
+.calendar-navigation {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.calendar-navigation button {
+  min-height: 44px;
+  white-space: nowrap;
+}
+
+.calendar-arrow {
+  min-width: 44px;
+  padding-inline: 0.65rem;
+  font-size: 1.1rem;
+}
+
+.calendar-period-summary {
+  color: var(--ink);
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
 .calendar-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(126px, 1fr));
-  gap: 0.7rem;
+  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+  gap: 0.55rem;
 }
 
 .calendar-day {
   border: 1px solid var(--line);
   border-radius: 8px;
-  padding: 0.8rem;
+  padding: 0.6rem;
   display: grid;
   gap: 0.35rem;
-  min-height: 90px;
+  min-height: 72px;
+  text-align: left;
+  color: var(--ink);
+  background: var(--panel);
 }
 
 .calendar-day strong {
   font-family: "Space Grotesk", sans-serif;
-  font-size: 1.05rem;
+  font-size: 0.9rem;
+}
+
+.calendar-day span {
+  font-size: 0.85rem;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.calendar-day.selected-day {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
+.calendar-detail {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.85rem;
+  display: grid;
+  gap: 0.75rem;
+  background: color-mix(in srgb, var(--panel) 88%, var(--accent) 12%);
+}
+
+.day-session-detail,
+.lift-detail {
+  border-top: 1px solid var(--line);
+  padding-top: 0.65rem;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.day-session-detail:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.calendar-page {
+  gap: 1rem;
+}
+
+.page-top-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.8rem;
+}
+
+.calendar-page-label {
+  color: var(--muted);
+  font-size: 0.9rem;
+  font-weight: 700;
+  text-align: right;
+}
+
+.hero-detail h2 {
+  margin: 0;
+}
+
+.sound-preference {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  margin-top: 0.35rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--line);
+}
+
+.sound-preference > div {
+  flex: 1 1 220px;
+}
+
+.sound-preference p {
+  max-width: 48ch;
+  margin-top: 0.25rem;
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.sound-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-height: 44px;
+  background: var(--card-bg);
+}
+
+.sound-toggle-track {
+  position: relative;
+  width: 34px;
+  height: 20px;
+  border: 1px solid var(--muted);
+  border-radius: 999px;
+  background: var(--control-bg);
+}
+
+.sound-toggle-track::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.sound-toggle[aria-checked="true"] {
+  border-color: var(--accent);
+  background: var(--card-selected-bg);
+}
+
+.sound-toggle[aria-checked="true"] .sound-toggle-track {
+  border-color: var(--accent);
+}
+
+.sound-toggle[aria-checked="true"] .sound-toggle-track::after {
+  transform: translateX(14px);
+  background: var(--accent);
+}
+
+.sound-toggle-status {
+  min-width: 1.7rem;
+  text-align: center;
+}
+
+.calendar-toolbar :focus-visible,
+.sound-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.detail-summary-grid,
+.set-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 0.6rem;
+}
+
+.detail-summary-grid div,
+.set-detail-grid div {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.7rem;
+  display: grid;
+  gap: 0.25rem;
+  background: color-mix(in srgb, var(--panel) 82%, var(--accent) 18%);
+}
+
+.detail-summary-grid span,
+.set-detail-grid span {
+  color: var(--muted);
+}
+
+.session-detail-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.session-detail-heading span {
+  color: var(--muted);
+  font-size: 0.9rem;
 }
 
 .game-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.7rem;
 }
 
@@ -288,11 +991,69 @@ select[multiple] {
   display: grid;
   gap: 0.3rem;
   background: color-mix(in srgb, var(--panel) 82%, var(--accent) 18%);
+  position: relative;
 }
 
 .game-stat span {
   font-size: 1.2rem;
   font-weight: 800;
+}
+
+.streak-game-stat {
+  padding-right: 2.45rem;
+}
+
+.panel-heading-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.rule-button {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: 50%;
+}
+
+.rule-popover {
+  position: absolute;
+  top: 2.35rem;
+  right: 0;
+  z-index: 3;
+  width: min(320px, 80vw);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.75rem;
+  color: var(--ink);
+  background: var(--panel);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.28);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-4px);
+  transition: opacity 0.16s ease, transform 0.16s ease;
+}
+
+.rule-popover p {
+  position: relative;
+  padding-left: 1rem;
+}
+
+.rule-popover p::before {
+  position: absolute;
+  left: 0;
+  content: "•";
+  color: var(--accent);
+  font-weight: 800;
+}
+
+.rule-button:hover + .rule-popover,
+.rule-button:focus + .rule-popover {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
 }
 
 .xp-track {
@@ -311,29 +1072,98 @@ select[multiple] {
 .share-card {
   border: 1px solid var(--line);
   border-radius: 8px;
-  padding: 1rem;
+  padding: clamp(1rem, 3vw, 2rem);
   background: linear-gradient(135deg, color-mix(in srgb, var(--panel) 80%, var(--accent) 20%), var(--panel));
   display: grid;
-  gap: 0.9rem;
+  gap: 1rem;
 }
 
-.share-grid {
+.share-card-header {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.share-card-header h3 {
+  margin: 0;
+  font-size: clamp(1.45rem, 3vw, 2rem);
+}
+
+.share-card-header p {
+  color: var(--ink);
+  font-family: "Space Grotesk", sans-serif;
+  font-size: clamp(1rem, 2.2vw, 1.35rem);
+}
+
+.share-card-level {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 0.65rem;
+}
+
+.share-card-level strong {
+  font-family: "Space Grotesk", sans-serif;
+  font-size: clamp(1.25rem, 2.5vw, 1.65rem);
+}
+
+.share-card-level span {
+  color: var(--muted);
+  font-size: 0.85rem;
+  text-align: right;
+}
+
+.share-card-progress {
+  height: 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--panel) 72%, var(--line) 28%);
+  overflow: hidden;
+}
+
+.share-card-progress div {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+}
+
+.share-stat-columns {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0.7rem;
+  gap: 0.8rem;
+  margin-top: 0.6rem;
 }
 
-.share-grid div {
+.share-stat-panel {
   border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 0.65rem;
+  border-radius: 14px;
+  padding: clamp(0.85rem, 2vw, 1.2rem);
   display: grid;
-  gap: 0.25rem;
+  gap: 1rem;
   background: color-mix(in srgb, var(--panel) 86%, var(--line) 14%);
 }
 
-.share-grid strong {
-  font-size: 0.85rem;
+.share-stat-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 0.8rem;
+}
+
+.share-stat-row strong {
+  font-size: 0.9rem;
+}
+
+.share-stat-row span {
+  max-width: 12rem;
+  color: var(--ink);
+  font-weight: 700;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.share-card footer {
+  color: var(--muted);
+  font-size: 0.78rem;
 }
 
 .gym-day {
@@ -367,6 +1197,17 @@ select[multiple] {
   gap: 0.5rem;
 }
 
+.header-actions {
+  display: grid;
+  justify-items: start;
+  gap: 0.55rem;
+  margin-top: 0.65rem;
+}
+
+.settings-button {
+  width: fit-content;
+}
+
 .theme-dot {
   width: 18px;
   height: 18px;
@@ -391,16 +1232,437 @@ select[multiple] {
 
 .cta-add-workout {
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  background-size: 180% 180%;
   border-color: transparent;
   color: var(--active-ink);
-  font-size: 1rem;
+  font-size: 0.95rem;
   font-weight: 800;
-  padding: 0.85rem 1rem;
+  padding: 0.65rem 0.9rem;
+  width: auto;
+  min-width: 0;
+  animation: cta-pulse 5s ease-in-out infinite;
+  box-shadow: 0 0 0 rgba(0, 0, 0, 0);
+}
+
+body[data-theme="dark"] .cta-add-workout {
+  background-image: linear-gradient(135deg, #f3a530, #f2b650, #f08b2f);
+}
+
+body[data-theme="pastel"] .cta-add-workout {
+  background-image: linear-gradient(135deg, #ff8fbd, #ffd6e5, #f25fa6);
+}
+
+body[data-theme="royal"] .cta-add-workout {
+  background-image: linear-gradient(135deg, #7b35c8, #b45bb8, #7b4d35);
 }
 
 .focus-trained {
   color: var(--accent-2);
   font-weight: 700;
+}
+
+.workout-nav {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  justify-content: flex-start;
+}
+
+.draft-save-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin-left: auto;
+}
+
+.draft-save-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2rem;
+  padding: 0.35rem 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--panel) 88%, var(--line) 12%);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.draft-save-status.saving {
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--line) 52%);
+  color: var(--accent);
+}
+
+.draft-save-status.saved {
+  border-color: color-mix(in srgb, var(--accent-2) 52%, var(--line) 48%);
+  color: var(--accent-2);
+}
+
+.draft-save-status.offline,
+.draft-save-status.device {
+  border-style: dashed;
+}
+
+.draft-save-status.error {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.compact-button {
+  width: auto;
+  padding: 0.45rem 0.65rem;
+}
+
+.workout-resume-card {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  border-color: color-mix(in srgb, var(--accent) 52%, var(--line) 48%);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--panel) 90%, var(--accent) 10%), var(--panel));
+}
+
+.resume-eyebrow {
+  display: block;
+  margin-bottom: 0.25rem;
+  color: var(--accent);
+  font-size: 0.76rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.back-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  width: auto;
+  padding: 0.5rem 0.75rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--panel) 84%, var(--accent) 16%);
+  color: var(--ink);
+}
+
+.back-button span {
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+.workout-steps {
+  display: grid;
+  gap: 0.6rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 94%, var(--accent) 6%);
+}
+
+.workout-steps-label {
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.workout-steps ol {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.workout-steps li {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+  padding-inline: 0.3rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.25;
+  text-align: center;
+}
+
+.workout-steps li:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  top: 0.96rem;
+  left: calc(50% + 1.2rem);
+  width: calc(100% - 2.4rem);
+  height: 2px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  opacity: 0.7;
+}
+
+.workout-steps li:not(:last-child)::before {
+  content: "";
+  position: absolute;
+  z-index: 1;
+  top: 0.72rem;
+  left: calc(150% - 1.45rem);
+  width: 0.45rem;
+  height: 0.45rem;
+  border-top: 2px solid var(--accent-2);
+  border-right: 2px solid var(--accent-2);
+  transform: rotate(45deg);
+}
+
+.workout-steps li > span {
+  display: grid;
+  z-index: 2;
+  flex: 0 0 2rem;
+  width: 2rem;
+  height: 2rem;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--line) 45%);
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--accent) 20%, var(--panel) 80%);
+  color: var(--accent);
+  box-shadow: 0 0 0 4px var(--panel);
+  font-size: 0.8rem;
+  font-weight: 900;
+}
+
+.workout-steps strong {
+  font-size: inherit;
+  max-width: 9rem;
+}
+
+.workout-date-picker {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 92%, var(--accent) 8%);
+}
+
+.workout-date-picker > div:first-child {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.workout-date-picker > div:first-child span {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.workout-date-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+.workout-date-option {
+  display: grid;
+  justify-items: start;
+  gap: 0.15rem;
+  text-align: left;
+}
+
+.workout-date-option span {
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 600;
+  transition: color 0.2s ease;
+}
+
+.workout-date-option.active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--control-bg) 72%, var(--accent) 28%);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.workout-date-option.active span {
+  color: var(--ink);
+}
+
+@media (max-width: 520px) {
+  .workout-steps {
+    gap: 0.45rem;
+    padding: 0.65rem 0.5rem;
+  }
+
+  .workout-steps li {
+    gap: 0.35rem;
+    padding-inline: 0.15rem;
+    font-size: 0.64rem;
+  }
+
+  .workout-steps li:not(:last-child)::after {
+    top: 0.72rem;
+    left: calc(50% + 0.9rem);
+    width: calc(100% - 1.8rem);
+  }
+
+  .workout-steps li:not(:last-child)::before {
+    top: 0.49rem;
+    left: calc(150% - 1.15rem);
+    width: 0.4rem;
+    height: 0.4rem;
+  }
+
+  .workout-steps li > span {
+    flex-basis: 1.5rem;
+    width: 1.5rem;
+    height: 1.5rem;
+    box-shadow: 0 0 0 3px var(--panel);
+    font-size: 0.68rem;
+  }
+
+  .workout-date-options {
+    grid-template-columns: 1fr;
+  }
+}
+
+.manual-input-field {
+  padding: 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  transition: border-color 0.18s ease, background-color 0.18s ease, color 0.18s ease;
+}
+
+.manual-input-field.is-disabled {
+  border-color: color-mix(in srgb, var(--line) 78%, var(--muted) 22%);
+  background: color-mix(in srgb, var(--panel) 86%, var(--muted) 14%);
+  color: var(--muted);
+}
+
+.manual-input-field.is-enabled {
+  border-color: color-mix(in srgb, var(--accent) 58%, var(--line) 42%);
+  background: color-mix(in srgb, var(--panel) 91%, var(--accent) 9%);
+}
+
+.submit-workout-button:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent-2) 78%, var(--line) 22%);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 82%, var(--panel) 18%), var(--accent-2));
+  color: var(--active-ink);
+  box-shadow: 0 5px 16px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
+.draft-lift-actions {
+  margin-top: 0.45rem;
+}
+
+.draft-lift-editing {
+  color: var(--accent-2);
+  font-size: 0.88rem;
+  font-weight: 700;
+}
+
+.lift-muscle-assignment {
+  color: var(--accent-2);
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.lift-muscle-assignment.unassigned,
+.assignment-warning {
+  color: var(--danger);
+  font-size: 0.84rem;
+}
+
+.lift-muscle-picker {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.lift-muscle-picker legend {
+  margin-bottom: 0.4rem;
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.lift-muscle-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(82px, 1fr));
+  gap: 0.45rem;
+}
+
+.lift-muscle-option {
+  position: relative;
+  display: block;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.lift-muscle-option input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.lift-muscle-option span {
+  display: grid;
+  min-height: 2.45rem;
+  padding: 0.5rem 0.55rem;
+  place-items: center;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--card-bg);
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 750;
+  line-height: 1.15;
+  text-align: center;
+  transition: border-color 0.18s ease, background-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+}
+
+.lift-muscle-option:hover span {
+  border-color: var(--accent);
+  color: var(--ink);
+  transform: translateY(-1px);
+}
+
+.lift-muscle-option input:focus-visible + span {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.lift-muscle-option input:checked + span {
+  border-color: var(--accent);
+  background: var(--card-selected-bg);
+  color: var(--ink);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.muscle-add-description {
+  max-width: 60ch;
+  margin: -0.2rem 0 0.15rem;
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
+.analytics-data-note {
+  padding-left: 0.65rem;
+  border-left: 2px solid var(--accent);
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.workout-muscle-section {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0.9rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 90%, var(--card-bg) 10%);
+}
+
+.workout-muscle-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
 }
 
 .muscle-card-grid {
@@ -446,12 +1708,95 @@ select[multiple] {
 
 @keyframes reveal {
   from {
-    opacity: 0;
-    transform: translateY(5px);
+    opacity: 0.35;
+    transform: translateY(8px) scale(0.996);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes screen-flow-in {
+  from {
+    opacity: 0.4;
+    transform: translateY(7px);
   }
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+@keyframes calendar-flow-in {
+  from {
+    opacity: 0.45;
+    transform: translateX(5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes grind-shine {
+  0% {
+    background-position: 0% 50%;
+    transform: translateY(0);
+  }
+  50% {
+    background-position: 100% 50%;
+    transform: translateY(-1px);
+  }
+  100% {
+    background-position: 0% 50%;
+    transform: translateY(0);
+  }
+}
+
+@keyframes cta-pulse {
+  0% {
+    background-position: 0% 50%;
+    box-shadow: 0 0 0 color-mix(in srgb, var(--accent) 0%, transparent);
+    transform: translateY(0);
+  }
+  50% {
+    background-position: 100% 50%;
+    box-shadow: 0 3px 10px color-mix(in srgb, var(--accent) 14%, transparent);
+    transform: translateY(-0.5px);
+  }
+  100% {
+    background-position: 0% 50%;
+    box-shadow: 0 0 0 color-mix(in srgb, var(--accent) 0%, transparent);
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .panel,
+  .content > :not(.panel),
+  .monthly-calendar > * {
+    animation: none;
+  }
+
+  .tab,
+  button {
+    transition: none;
+  }
+
+  .tab:hover,
+  button:hover,
+  button:active:not(:disabled),
+  .chart-column-button:hover,
+  .chart-column-button:focus-visible {
+    transform: none;
+    filter: none;
+  }
+
+  .fire-lit,
+  .fire-lit::before,
+  .fire-lit .fire-core {
+    animation: none;
   }
 }
 
@@ -463,13 +1808,23 @@ select[multiple] {
   .dashboard-row {
     grid-template-columns: 1fr;
   }
+  .dashboard-cta-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .grind-welcome {
+    margin-right: 0;
+  }
   .muscle-management-grid {
     grid-template-columns: 1fr;
   }
   .game-grid {
     grid-template-columns: 1fr;
   }
-  .share-grid {
+  .share-stat-columns {
+    grid-template-columns: 1fr;
+  }
+  .muscle-total-range-grid {
     grid-template-columns: 1fr;
   }
   .tabs {
@@ -478,6 +1833,39 @@ select[multiple] {
 }
 
 @media (max-width: 560px) {
+  .calendar-period-fields {
+    max-width: none;
+    flex-basis: 100%;
+  }
+
+  .calendar-navigation {
+    width: 100%;
+  }
+
+  #calendar-current {
+    flex: 1;
+  }
+
+  .submitted-workouts-heading {
+    grid-template-columns: 1fr;
+  }
+
+  .workout-resume-card {
+    grid-template-columns: 1fr;
+  }
+
+  .draft-save-controls {
+    width: 100%;
+    margin-left: 0;
+    justify-content: space-between;
+  }
+
+  .analytics-chart-heading,
+  .workout-muscle-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 0.2rem;
+  }
   .tabs {
     grid-template-columns: 1fr;
   }
