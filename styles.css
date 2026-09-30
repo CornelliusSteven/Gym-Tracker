@@ -1,3 +1,24 @@
+body[data-theme="graphite"] {
+  color-scheme: dark;
+  --bg: #242628;
+  --panel: #2d3033;
+  --ink: #f5f5f5;
+  --muted: #c2c5c8;
+  --accent: #ffffff;
+  --accent-2: #d6d8da;
+  --danger: #ffffff;
+  --line: #666a6e;
+  --control-bg: #35383b;
+  --control-ink: #f5f5f5;
+  --input-bg: #292b2e;
+  --input-ink: #f5f5f5;
+  --card-bg: #35383b;
+  --card-selected-bg: #46494c;
+  --active-ink: #242628;
+  --fire: #ffffff;
+  --fire-core: #d6d8da;
+}
+
 body[data-theme="dark"] {
   --bg: #111315;
   --panel: #1a1d20;
@@ -1873,4 +1894,45 @@ body[data-theme="royal"] .cta-add-workout {
     align-items: start;
     flex-direction: column;
   }
+}
+
+/* Main graphite theme: neutral surfaces and restrained white edge lighting. */
+body[data-theme="graphite"] {
+  background:
+    radial-gradient(circle at 10% 10%, rgb(255 255 255 / 5%), transparent 38%),
+    radial-gradient(circle at 80% 0%, rgb(255 255 255 / 3%), transparent 35%),
+    var(--bg);
+}
+
+.theme-dot.graphite {
+  background: linear-gradient(135deg, #35383b 48%, #ffffff 52%);
+}
+
+body[data-theme="graphite"] .panel {
+  border-color: #a5a8ab;
+  box-shadow: 0 0 12px rgb(255 255 255 / 7%), inset 0 0 1px rgb(255 255 255 / 18%);
+}
+
+body[data-theme="graphite"] .metric {
+  background: linear-gradient(160deg, #303336, #3a3d40);
+}
+
+body[data-theme="graphite"] .cta-add-workout {
+  background: linear-gradient(135deg, #35383b, #46494c);
+  color: var(--ink);
+  border-color: #ffffff;
+  animation: none;
+  box-shadow: 0 0 12px rgb(255 255 255 / 18%), inset 0 0 8px rgb(255 255 255 / 5%);
+}
+
+body[data-theme="graphite"] button:hover:not(:disabled),
+body[data-theme="graphite"] .workout-date-option.active {
+  border-color: #ffffff;
+  box-shadow: 0 0 10px rgb(255 255 255 / 16%);
+}
+
+body[data-theme="graphite"] :is(button, input, select, textarea):focus-visible {
+  outline: 2px solid #ffffff;
+  outline-offset: 3px;
+  box-shadow: 0 0 12px rgb(255 255 255 / 18%);
 }

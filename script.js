@@ -564,7 +564,7 @@ function registerDraftLifecycleHandlers() {
 
 function loadTheme() {
   const saved = localStorage.getItem(THEME_KEY);
-  return ["dark", "pastel", "royal"].includes(saved) ? saved : "dark";
+  return ["graphite", "dark", "pastel", "royal"].includes(saved) ? saved : "graphite";
 }
 
 function saveTheme(theme) {
@@ -883,6 +883,7 @@ function renderThemePicker() {
     <div class="theme-picker-wrap">
       <span class="theme-label">Theme:</span>
       <div class="theme-picker" role="group" aria-label="Theme picker">
+        <button type="button" class="theme-dot graphite ${state.theme === "graphite" ? "active" : ""}" data-theme="graphite" title="Graphite · Main" aria-label="Graphite · Main" aria-pressed="${state.theme === "graphite"}"></button>
         <button type="button" class="theme-dot ${state.theme === "dark" ? "active" : ""}" data-theme="dark" title="Current dark-grey"></button>
         <button type="button" class="theme-dot pastel ${state.theme === "pastel" ? "active" : ""}" data-theme="pastel" title="Pastel pink"></button>
         <button type="button" class="theme-dot royal ${state.theme === "royal" ? "active" : ""}" data-theme="royal" title="Purple and brown"></button>
@@ -2668,6 +2669,17 @@ function downloadShareImage(payload) {
 
 function getCanvasTheme() {
   const themes = {
+    graphite: {
+      bg: "#242628",
+      panel: "#2d3033",
+      gradientStart: "#383b3e",
+      gradientEnd: "#26282b",
+      card: "#35383b",
+      ink: "#f5f5f5",
+      muted: "#c2c5c8",
+      accent: "#ffffff",
+      accent2: "#d6d8da",
+    },
     dark: {
       bg: "#111315",
       panel: "#1a1d20",
@@ -2702,7 +2714,7 @@ function getCanvasTheme() {
       accent2: "#b98255",
     },
   };
-  return themes[state.theme] || themes.dark;
+  return themes[state.theme] || themes.graphite;
 }
 
 function roundRect(ctx, x, y, width, height, radius) {
