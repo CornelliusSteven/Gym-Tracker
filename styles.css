@@ -1,22 +1,22 @@
 body[data-theme="graphite"] {
   color-scheme: dark;
-  --bg: #242628;
-  --panel: #2d3033;
+  --bg: #101113;
+  --panel: #181a1d;
   --ink: #f5f5f5;
   --muted: #c2c5c8;
   --accent: #ffffff;
   --accent-2: #d6d8da;
   --danger: #ffffff;
-  --line: #666a6e;
-  --control-bg: #35383b;
+  --line: #51565c;
+  --control-bg: #202226;
   --control-ink: #f5f5f5;
-  --input-bg: #292b2e;
+  --input-bg: #131517;
   --input-ink: #f5f5f5;
-  --card-bg: #35383b;
-  --card-selected-bg: #46494c;
-  --active-ink: #242628;
-  --fire: #ffffff;
-  --fire-core: #d6d8da;
+  --card-bg: #202226;
+  --card-selected-bg: #303338;
+  --active-ink: #101113;
+  --fire: #ff3b30;
+  --fire-core: #ff8a65;
 }
 
 body[data-theme="dark"] {
@@ -1896,33 +1896,33 @@ body[data-theme="royal"] .cta-add-workout {
   }
 }
 
-/* Main graphite theme: neutral surfaces and restrained white edge lighting. */
+/* Main graphite theme: neutral surfaces and bright white neon edge lighting. */
 body[data-theme="graphite"] {
   background:
-    radial-gradient(circle at 10% 10%, rgb(255 255 255 / 5%), transparent 38%),
-    radial-gradient(circle at 80% 0%, rgb(255 255 255 / 3%), transparent 35%),
+    radial-gradient(circle at 10% 10%, rgb(255 255 255 / 2%), transparent 38%),
+    radial-gradient(circle at 80% 0%, rgb(255 255 255 / 1%), transparent 35%),
     var(--bg);
 }
 
 .theme-dot.graphite {
-  background: linear-gradient(135deg, #35383b 48%, #ffffff 52%);
+  background: linear-gradient(135deg, #202226 48%, #ffffff 52%);
 }
 
 body[data-theme="graphite"] .panel {
-  border-color: #a5a8ab;
-  box-shadow: 0 0 12px rgb(255 255 255 / 7%), inset 0 0 1px rgb(255 255 255 / 18%);
+  border-color: #ffffff;
+  box-shadow: 0 0 3px rgb(255 255 255 / 35%), 0 0 16px rgb(255 255 255 / 12%), inset 0 0 8px rgb(255 255 255 / 4%);
 }
 
 body[data-theme="graphite"] .metric {
-  background: linear-gradient(160deg, #303336, #3a3d40);
+  background: linear-gradient(160deg, #191b1e, #25282c);
 }
 
 body[data-theme="graphite"] .cta-add-workout {
-  background: linear-gradient(135deg, #35383b, #46494c);
+  background: linear-gradient(135deg, #202226, #303338);
   color: var(--ink);
   border-color: #ffffff;
   animation: none;
-  box-shadow: 0 0 12px rgb(255 255 255 / 18%), inset 0 0 8px rgb(255 255 255 / 5%);
+  box-shadow: 0 0 4px rgb(255 255 255 / 45%), 0 0 18px rgb(255 255 255 / 22%), inset 0 0 8px rgb(255 255 255 / 5%);
 }
 
 body[data-theme="graphite"] button:hover:not(:disabled),
@@ -1934,5 +1934,5 @@ body[data-theme="graphite"] .workout-date-option.active {
 body[data-theme="graphite"] :is(button, input, select, textarea):focus-visible {
   outline: 2px solid #ffffff;
   outline-offset: 3px;
-  box-shadow: 0 0 12px rgb(255 255 255 / 18%);
+  box-shadow: 0 0 4px rgb(255 255 255 / 45%), 0 0 18px rgb(255 255 255 / 22%);
 }

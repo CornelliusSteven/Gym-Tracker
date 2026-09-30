@@ -2670,11 +2670,11 @@ function downloadShareImage(payload) {
 function getCanvasTheme() {
   const themes = {
     graphite: {
-      bg: "#242628",
-      panel: "#2d3033",
-      gradientStart: "#383b3e",
-      gradientEnd: "#26282b",
-      card: "#35383b",
+      bg: "#101113",
+      panel: "#181a1d",
+      gradientStart: "#222529",
+      gradientEnd: "#121416",
+      card: "#202226",
       ink: "#f5f5f5",
       muted: "#c2c5c8",
       accent: "#ffffff",
